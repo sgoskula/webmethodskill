@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Values>
+  <value name="node_type">service</value>
+  <value name="svc_type">flow</value>
+  <value name="node_comment">Allocates stock for one SKU. Returns allocated=true/false.</value>
+  <record name="svc_sig">
+    <record name="sig_in"><array name="rec_fields"><record><value name="field_name">sku</value><value name="field_type">string</value><value name="field_dim">0</value></record><record><value name="field_name">qty</value><value name="field_type">string</value><value name="field_dim">0</value></record></array></record>
+    <record name="sig_out"><array name="rec_fields"><record><value name="field_name">allocated</value><value name="field_type">string</value><value name="field_dim">0</value></record><record><value name="field_name">warehouse</value><value name="field_type">string</value><value name="field_dim">0</value></record></array></record>
+  </record>
+</Values>

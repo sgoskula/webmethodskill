@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Values>
+  <value name="node_type">trigger</value>
+  <value name="node_comment">Subscribes to FulfilDoc and starts fulfilment orchestration.</value>
+  <value name="service">fulfil.process:orchestrateFulfillment</value>
+  <value name="documentType">fulfil.docs:FulfilDoc</value>
+  <value name="joinType">NONE</value>
+  <value name="concurrency">concurrent</value>
+  <value name="maxThreads">8</value>
+  <value name="maxRetries">3</value>
+  <value name="retryInterval">30</value>
+</Values>

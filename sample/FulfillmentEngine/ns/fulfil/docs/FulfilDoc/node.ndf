@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Values>
+  <value name="node_type">record</value>
+  <value name="node_comment">Published when an order is ready to be fulfilled.</value>
+  <array name="rec_fields">
+    <record><value name="field_name">orderId</value><value name="field_type">string</value><value name="field_dim">0</value></record>
+    <record><value name="field_name">priority</value><value name="field_type">string</value><value name="field_dim">0</value><value name="field_opt">true</value></record>
+    <record><value name="field_name">region</value><value name="field_type">string</value><value name="field_dim">0</value><value name="field_opt">true</value></record>
+    <record><value name="field_name">weightKg</value><value name="field_type">string</value><value name="field_dim">0</value></record>
+    <record>
+      <value name="field_name">items</value><value name="field_type">record</value><value name="field_dim">1</value>
+      <array name="rec_fields">
+        <record><value name="field_name">sku</value><value name="field_type">string</value><value name="field_dim">0</value></record>
+        <record><value name="field_name">qty</value><value name="field_type">string</value><value name="field_dim">0</value></record>
+        <record><value name="field_name">hazmat</value><value name="field_type">string</value><value name="field_dim">0</value><value name="field_opt">true</value></record>
+      </array>
+    </record>
+  </array>
+</Values>

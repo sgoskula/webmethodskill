@@ -32,6 +32,7 @@ Raw `flow.xml` is huge and easy to misread. Extracting first means no `BRANCH` c
             └── webmethods-artifacts.md  # raw IS artifacts + runtime semantics
 sample/OrderProcessing/                  # synthetic IS packages used as test fixtures:
 sample/CommonUtils/                      #   3 capabilities (2 triggers + 1 REST) and a shared package
+sample/FulfillmentEngine/                 #   complex-flow stress sample (not in tests/FSD): nested BRANCH/LOOP/TRY/REPEAT, see its README
 tests/test_wm_fsd.py                     # tests for the extractor, lint and sample FSD
 docs/FSD.md                              # FSD generated from the sample package
 ```
