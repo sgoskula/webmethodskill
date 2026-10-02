@@ -3,6 +3,16 @@
     {
       "package": "OrderProcessing",
       "requires": [
+        "WmPublic",
+        "CommonUtils"
+      ],
+      "startup": [],
+      "shutdown": [],
+      "version": "1.0"
+    },
+    {
+      "package": "CommonUtils",
+      "requires": [
         "WmPublic"
       ],
       "startup": [],
@@ -16,10 +26,27 @@
       "invokes": [],
       "invoked_by": []
     },
+    "order.triggers:cancelTrigger": {
+      "kind": "Trigger",
+      "invokes": [],
+      "invoked_by": []
+    },
     "order.docs:OrderDoc": {
       "kind": "Document type",
       "invokes": [],
       "invoked_by": []
+    },
+    "order.docs:CancelDoc": {
+      "kind": "Document type",
+      "invokes": [],
+      "invoked_by": []
+    },
+    "order.jdbc:selectOrder": {
+      "kind": "jdbc service",
+      "invokes": [],
+      "invoked_by": [
+        "order.api.orders:_get"
+      ]
     },
     "order.jdbc:insertOrder": {
       "kind": "jdbc service",
@@ -27,6 +54,31 @@
       "invoked_by": [
         "order.process:submitOrder"
       ]
+    },
+    "order.jdbc:updateOrderStatus": {
+      "kind": "jdbc service",
+      "invokes": [],
+      "invoked_by": [
+        "order.process:cancelOrder"
+      ]
+    },
+    "order.api.orders:_get": {
+      "kind": "Flow service",
+      "invokes": [
+        "common.util:logEvent",
+        "order.jdbc:selectOrder",
+        "pub.flow:setResponseCode",
+        "pub.list:sizeOfList"
+      ],
+      "invoked_by": []
+    },
+    "order.process:cancelOrder": {
+      "kind": "Flow service",
+      "invokes": [
+        "common.util:logEvent",
+        "order.jdbc:updateOrderStatus"
+      ],
+      "invoked_by": []
     },
     "order.process:validateOrder": {
       "kind": "Java service",
@@ -45,17 +97,32 @@
         "pub.math:multiplyFloats"
       ],
       "invoked_by": []
+    },
+    "common.util:logEvent": {
+      "kind": "Flow service",
+      "invokes": [
+        "pub.flow:debugLog"
+      ],
+      "invoked_by": [
+        "order.api.orders:_get",
+        "order.process:cancelOrder"
+      ]
     }
   },
   "entry_points": [
+    "order.api.orders:_get",
+    "order.process:cancelOrder",
     "order.process:submitOrder"
   ],
   "triggered": [
+    "order.process:cancelOrder",
     "order.process:submitOrder"
   ],
   "integrations": {
     "Adapter service (jdbc)": [
-      "order.jdbc:insertOrder"
+      "order.jdbc:insertOrder",
+      "order.jdbc:selectOrder",
+      "order.jdbc:updateOrderStatus"
     ],
     "HTTP/REST call": [
       "order.process:submitOrder"
@@ -75,8 +142,204 @@
     "order.process:validateOrder": [
       "Uses floating-point arithmetic (`double`/`float`) on values that may be money. A re-implementation must decide whether to copy that exactly or use a decimal type"
     ],
+    "order.triggers:cancelTrigger": [
+      "Trigger retries only happen when `order.process:cancelOrder` throws an ISRuntimeException (for example via `pub.flow:throwExceptionForRetry` or a transient adapter error). Its call tree never does this explicitly, so ordinary failures are not retried"
+    ],
     "order.triggers:orderTrigger": [
       "Trigger retries only happen when `order.process:submitOrder` throws an ISRuntimeException (for example via `pub.flow:throwExceptionForRetry` or a transient adapter error). Its call tree never does this explicitly, so ordinary failures are not retried"
     ]
+  },
+  "architecture": {
+    "roots": [
+      "order.api.orders:_get",
+      "order.process:cancelOrder",
+      "order.process:submitOrder"
+    ],
+    "roles": {
+      "order.triggers:orderTrigger": "Trigger (subscription)",
+      "order.triggers:cancelTrigger": "Trigger (subscription)",
+      "order.docs:OrderDoc": "Data contract (document type)",
+      "order.docs:CancelDoc": "Data contract (document type)",
+      "order.jdbc:selectOrder": "Data access (adapter)",
+      "order.jdbc:insertOrder": "Data access (adapter)",
+      "order.jdbc:updateOrderStatus": "Data access (adapter)",
+      "order.api.orders:_get": "Entry: REST GET /rest/order/api/orders",
+      "order.process:cancelOrder": "Entry: trigger order.triggers:cancelTrigger",
+      "order.process:validateOrder": "Business logic (Java)",
+      "order.process:submitOrder": "Entry: trigger order.triggers:orderTrigger",
+      "common.util:logEvent": "Shared utility"
+    },
+    "capability_components": {
+      "order.api.orders:_get": [
+        "common.util:logEvent",
+        "order.api.orders:_get",
+        "order.jdbc:selectOrder"
+      ],
+      "order.process:cancelOrder": [
+        "common.util:logEvent",
+        "order.jdbc:updateOrderStatus",
+        "order.process:cancelOrder",
+        "order.triggers:cancelTrigger"
+      ],
+      "order.process:submitOrder": [
+        "order.jdbc:insertOrder",
+        "order.process:submitOrder",
+        "order.process:validateOrder",
+        "order.triggers:orderTrigger"
+      ]
+    },
+    "component_capabilities": {
+      "order.triggers:orderTrigger": [
+        "order.process:submitOrder"
+      ],
+      "order.triggers:cancelTrigger": [
+        "order.process:cancelOrder"
+      ],
+      "order.docs:OrderDoc": [
+        "order.process:submitOrder"
+      ],
+      "order.docs:CancelDoc": [
+        "order.process:cancelOrder"
+      ],
+      "order.jdbc:selectOrder": [
+        "order.api.orders:_get"
+      ],
+      "order.jdbc:insertOrder": [
+        "order.process:submitOrder"
+      ],
+      "order.jdbc:updateOrderStatus": [
+        "order.process:cancelOrder"
+      ],
+      "order.api.orders:_get": [
+        "order.api.orders:_get"
+      ],
+      "order.process:cancelOrder": [
+        "order.process:cancelOrder"
+      ],
+      "order.process:validateOrder": [
+        "order.process:submitOrder"
+      ],
+      "order.process:submitOrder": [
+        "order.process:submitOrder"
+      ],
+      "common.util:logEvent": [
+        "order.api.orders:_get",
+        "order.process:cancelOrder"
+      ]
+    },
+    "shared_components": [
+      "common.util:logEvent"
+    ],
+    "doc_usage": {
+      "order.docs:CancelDoc": [
+        "order.process:cancelOrder",
+        "order.triggers:cancelTrigger"
+      ],
+      "order.docs:OrderDoc": [
+        "order.process:submitOrder",
+        "order.process:validateOrder",
+        "order.triggers:orderTrigger"
+      ]
+    },
+    "adapters": {
+      "order.jdbc:selectOrder": {
+        "tables": [
+          "ORDERS"
+        ],
+        "operations": [
+          "SELECT"
+        ],
+        "connection": "OrderDB_Conn"
+      },
+      "order.jdbc:insertOrder": {
+        "tables": [
+          "ORDERS"
+        ],
+        "operations": [
+          "INSERT"
+        ],
+        "connection": "OrderDB_Conn"
+      },
+      "order.jdbc:updateOrderStatus": {
+        "tables": [
+          "ORDERS"
+        ],
+        "operations": [
+          "UPDATE"
+        ],
+        "connection": "OrderDB_Conn"
+      }
+    },
+    "endpoints": {
+      "order.process:submitOrder": [
+        "https://payments.internal/charge"
+      ]
+    },
+    "data_access": {
+      "ORDERS": {
+        "order.api.orders:_get": [
+          "SELECT"
+        ],
+        "order.process:cancelOrder": [
+          "UPDATE"
+        ],
+        "order.process:submitOrder": [
+          "INSERT"
+        ]
+      }
+    },
+    "cross_package_calls": {
+      "OrderProcessing -> CommonUtils": [
+        "order.api.orders:_get \u2192 common.util:logEvent",
+        "order.process:cancelOrder \u2192 common.util:logEvent"
+      ]
+    },
+    "systems": [
+      {
+        "type": "Database (outbound)",
+        "detail": "connection `OrderDB_Conn`, tables ORDERS",
+        "used_by": [
+          "order.jdbc:insertOrder",
+          "order.jdbc:selectOrder",
+          "order.jdbc:updateOrderStatus"
+        ]
+      },
+      {
+        "type": "HTTP endpoint (outbound)",
+        "detail": "`https://payments.internal/charge`",
+        "used_by": [
+          "order.process:submitOrder"
+        ]
+      },
+      {
+        "type": "Publisher (inbound, publish/subscribe)",
+        "detail": "publishes `order.docs:CancelDoc`",
+        "used_by": [
+          "order.triggers:cancelTrigger"
+        ]
+      },
+      {
+        "type": "Publisher (inbound, publish/subscribe)",
+        "detail": "publishes `order.docs:OrderDoc`",
+        "used_by": [
+          "order.triggers:orderTrigger"
+        ]
+      },
+      {
+        "type": "REST client (inbound)",
+        "detail": "GET /rest/order/api/orders",
+        "used_by": [
+          "order.api.orders:_get"
+        ]
+      }
+    ],
+    "observations": [
+      "Table `ORDERS` is shared by 3 capabilities (`order.api.orders:_get` SELECT; `order.process:cancelOrder` UPDATE; `order.process:submitOrder` INSERT). Document its lifecycle across capabilities and check how they interact (ordering, status assumptions, concurrency)",
+      "Logging is inconsistent: `order.api.orders:_get` logs, `order.process:cancelOrder` logs, `order.process:submitOrder` has no logging",
+      "Error handling is inconsistent: `order.api.orders:_get` has no TRY/CATCH, `order.process:cancelOrder` has no TRY/CATCH, `order.process:submitOrder` uses TRY/CATCH",
+      "Hard-coded URL `https://payments.internal/charge` in `order.process:submitOrder` instead of an endpoint alias or configuration value",
+      "All 3 adapter services share connection `OrderDB_Conn`; its transaction type and pool size affect every capability that uses it"
+    ],
+    "component_diagram_level": "component"
   }
 }

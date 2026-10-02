@@ -2,7 +2,9 @@
 
 - **Kind:** Flow service
 - **Package:** OrderProcessing
+- **Role:** Entry: trigger order.triggers:orderTrigger
 - **Source dir:** `sample/OrderProcessing/ns/order/process/submitOrder`
+- **Used by capabilities:** order.process:submitOrder
 - **Developer comment:** Validates, persists and confirms a customer order. Triggered by orderTrigger when a new OrderDoc is published.
 - **Referenced by (trigger/REST/WSD/other):** order.triggers:orderTrigger
 

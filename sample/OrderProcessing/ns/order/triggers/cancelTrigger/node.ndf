@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Values>
+  <value name="node_type">trigger</value>
+  <value name="node_comment">Subscribes to CancelDoc publications and invokes order cancellation.</value>
+  <value name="service">order.process:cancelOrder</value>
+  <value name="documentType">order.docs:CancelDoc</value>
+  <value name="joinType">NONE</value>
+  <value name="concurrency">concurrent</value>
+  <value name="maxThreads">4</value>
+  <value name="maxRetries">0</value>
+  <value name="retryInterval">0</value>
+</Values>

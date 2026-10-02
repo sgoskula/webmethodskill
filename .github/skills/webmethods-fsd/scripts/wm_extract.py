@@ -196,6 +196,7 @@ class FlowWalker:
         self.max_nodes = 120
         self.events = []  # ordered (kind, path, extra): read / write / out / invoke
         self.notes = []
+        self.endpoints = []
 
     def ev(self, kind, path, extra=None):
         p = path if kind == "invoke" else clean_path(path)
@@ -230,6 +231,11 @@ class FlowWalker:
         for m in el.findall("MAP"):
             if m.get("MODE", "").upper() == "INPUT":
                 reads += self.map_events(m, "INPUT")
+                if el.get("SERVICE", "").startswith("pub.client:http"):
+                    for c in m:
+                        if clean_path(c.get("FIELD") or c.get("TO")) == "url":
+                            self.endpoints.append(mapset_value(c) if c.tag == "MAPSET"
+                                                  else f"(dynamic, from {clean_path(c.get('FROM'))})")
         self.ev("invoke", el.get("SERVICE", "?"), tuple(reads))
         for m in el.findall("MAP"):
             if m.get("MODE", "").upper() == "OUTPUT":
@@ -398,7 +404,8 @@ def parse_flow(path):
     try:
         root = ET.parse(path).getroot()
     except Exception as exc:
-        return {"error": str(exc), "lines": [], "invokes": [], "mermaid": "", "events": [], "notes": []}
+        return {"error": str(exc), "lines": [], "invokes": [], "mermaid": "", "events": [], "notes": [],
+                "endpoints": []}
     w = FlowWalker()
     start = w.new_node("Start", "stad")
     ends = w.walk_children(root, 0, [start])
@@ -406,7 +413,7 @@ def parse_flow(path):
     w.edge(ends, end)
     mermaid = "" if w.truncated else "flowchart TD\n" + "\n".join(w.mm)
     return {"lines": w.lines, "invokes": w.invokes, "mermaid": mermaid, "truncated": w.truncated,
-            "events": w.events, "notes": w.notes}
+            "events": w.events, "notes": w.notes, "endpoints": w.endpoints}
 
 
 # ---------------------------------------------------------------- java source
@@ -552,6 +559,284 @@ def semantic_flags(n, nodes, referenced):
     return list(dict.fromkeys(flags))
 
 
+# ---------------------------------------------------------------- existing architecture
+REST_RE = re.compile(r":_(get|post|put|delete|patch)$")
+OP_RE = re.compile(r"\s*(select|insert|update|delete|merge|call|exec)\b", re.I)
+TABLE_RE = re.compile(r"\b(?:into|update|from|join)\s+([A-Za-z_][\w.$]*)", re.I)
+MAX_DIAGRAM_NODES = 40
+
+
+def mid(name):
+    return "s_" + re.sub(r"[^A-Za-z0-9_]", "_", name)
+
+
+def adapter_info(n):
+    props = flatten(n["ndf"])
+    stmts = [v for _, v in props if OP_RE.match(v) and " " in v.strip()]
+    tables = {t.upper() for s in stmts for t in TABLE_RE.findall(s)}
+    tables |= {v.upper() for k, v in props if k.split(".")[-1].lower() in ("table", "tablename")}
+    return {"tables": sorted(tables),
+            "operations": sorted({OP_RE.match(s).group(1).upper() for s in stmts}),
+            "connection": next((v for k, v in props if "connection" in k.split(".")[-1].lower()), "")}
+
+
+def rest_path(name):
+    return "/rest/" + name.split(":")[0].replace(".", "/")
+
+
+def build_architecture(pkgs, nodes, referenced, entry, triggered, external):
+    kind = {k: kind_of(n) for k, n in nodes.items()}
+    is_svc = lambda k: bool(nodes[k]["svc_type"])  # noqa: E731
+    is_adapter = lambda k: nodes[k]["svc_type"] not in ("", "flow", "java", "spec")  # noqa: E731
+    trig_of = {s: sorted(r for r in referenced.get(s, ()) if kind[r] == "Trigger") for s in nodes}
+    triggers = sorted(k for k in nodes if kind[k] == "Trigger")
+    trig_targets = {t: sorted(s for s in nodes if t in referenced.get(s, ()) and is_svc(s)) for t in triggers}
+    docs = sorted(k for k in nodes if kind[k] == "Document type")
+    doc_users = {d: sorted(k for k, n in nodes.items() if k != d and d in json.dumps(n["ndf"])) for d in docs}
+
+    roots = sorted(s for s in set(entry) | set(triggered) if s in nodes and is_svc(s))
+    reach = {r: reachable(r, nodes) for r in roots}
+    users = defaultdict(set)
+    for r, rs in reach.items():
+        for s in rs:
+            if s in nodes:
+                users[s].add(r)
+        for t in trig_of[r]:
+            users[t].add(r)
+    for d, us in doc_users.items():
+        for u in us:
+            users[d] |= users.get(u, set())
+
+    def role(k):
+        m = REST_RE.search(k) if is_svc(k) else None
+        if kind[k] == "Trigger":
+            return "Trigger (subscription)"
+        if kind[k] == "Document type":
+            return "Data contract (document type)"
+        if m:
+            return f"Entry: REST {m.group(1).upper()} {rest_path(k)}"
+        if trig_of[k] and is_svc(k):
+            return "Entry: trigger " + ", ".join(trig_of[k])
+        if is_svc(k) and is_adapter(k):
+            return "Data access (adapter)"
+        if k in entry:
+            return "Entry: not invoked by any scanned service (scheduler, manual or external caller?)"
+        if len(users[k]) > 1 or re.search(r"util|common", nodes[k]["folder"], re.I):
+            return "Shared utility"
+        return {"flow": "Orchestration (flow)", "java": "Business logic (Java)"}.get(nodes[k]["svc_type"], kind[k])
+
+    roles = {k: role(k) for k in nodes}
+    adapters = {k: adapter_info(nodes[k]) for k in nodes if is_svc(k) and is_adapter(k)}
+    endpoints = {k: n["flow"]["endpoints"] for k, n in nodes.items() if (n.get("flow") or {}).get("endpoints")}
+
+    access = defaultdict(lambda: defaultdict(set))
+    for r, rs in reach.items():
+        for a in rs:
+            for t in adapters.get(a, {}).get("tables", []):
+                access[t][r] |= set(adapters[a]["operations"])
+
+    pkg_of = {k: n["package"] for k, n in nodes.items()}
+    scanned = {p["package"] for p in pkgs}
+    requires = {p["package"]: set(p["requires"]) for p in pkgs}
+    cross = defaultdict(set)
+    for k, n in nodes.items():
+        for c in (n.get("flow") or {}).get("invokes", []):
+            if c in nodes and pkg_of[c] != n["package"]:
+                cross[(n["package"], pkg_of[c])].add(f"{k} → {c}")
+
+    systems = []
+    by_conn = defaultdict(lambda: [set(), set()])
+    for a, info in adapters.items():
+        by_conn[info["connection"] or "(unknown connection)"][0].update(info["tables"])
+        by_conn[info["connection"] or "(unknown connection)"][1].add(a)
+    for c, (tables, ads) in sorted(by_conn.items()):
+        systems.append(("Database (outbound)", f"connection `{c}`, tables {', '.join(sorted(tables)) or '?'}", sorted(ads)))
+    eps_by = defaultdict(set)
+    for s, eps in endpoints.items():
+        for e in eps:
+            eps_by[e].add(s)
+    for e, ss in sorted(eps_by.items()):
+        systems.append(("HTTP endpoint (outbound)", f"`{e}`", sorted(ss)))
+    subs = {t: [d for d in docs if d in json.dumps(nodes[t]["ndf"])] for t in triggers}
+    for t in triggers:
+        for d in subs[t]:
+            systems.append(("Publisher (inbound, publish/subscribe)", f"publishes `{d}`", [t]))
+    for k in sorted(roles):
+        if roles[k].startswith("Entry: REST"):
+            systems.append(("REST client (inbound)", roles[k][len("Entry: REST "):], [k]))
+    for k, callers in sorted(external.items()):
+        systems.append(("Service outside scanned packages", f"`{k}`", sorted(callers)))
+
+    obs = []
+    for (a, b), calls in sorted(cross.items()):
+        if b not in requires.get(a, set()):
+            obs.append(f"Package `{a}` calls `{b}` ({len(calls)} call(s)) but doesn't declare it in manifest.v3 "
+                       "`requires`, so load order isn't guaranteed")
+    for t, caps in sorted(access.items()):
+        if len(caps) > 1 and any(ops - {"SELECT"} for ops in caps.values()):
+            desc = "; ".join(f"`{r}` {'/'.join(sorted(ops))}" for r, ops in sorted(caps.items()))
+            obs.append(f"Table `{t}` is shared by {len(caps)} capabilities ({desc}). Document its lifecycle across "
+                       "capabilities and check how they interact (ordering, status assumptions, concurrency)")
+    has_log = {r: any(re.search("log", s.split(":")[-1], re.I) for s in reach[r]) for r in roots}
+    if any(has_log.values()) and not all(has_log.values()):
+        obs.append("Logging is inconsistent: " + ", ".join(
+            f"`{r}` " + ("logs" if v else "has no logging") for r, v in sorted(has_log.items())))
+    has_try = {r: any(ln.strip().startswith("TRY") for s in reach[r]
+                      for ln in (nodes.get(s, {}).get("flow") or {}).get("lines", [])) for r in roots}
+    if any(has_try.values()) and not all(has_try.values()):
+        obs.append("Error handling is inconsistent: " + ", ".join(
+            f"`{r}` " + ("uses TRY/CATCH" if v else "has no TRY/CATCH") for r, v in sorted(has_try.items())))
+    for e, ss in sorted(eps_by.items()):
+        if e.lower().startswith("http"):
+            obs.append(f"Hard-coded URL `{e}` in {', '.join(f'`{s}`' for s in sorted(ss))} instead of an "
+                       "endpoint alias or configuration value")
+    conns = {c for c in by_conn}
+    if len(conns) == 1 and len(adapters) > 1:
+        obs.append(f"All {len(adapters)} adapter services share connection `{next(iter(conns))}`; its transaction "
+                   "type and pool size affect every capability that uses it")
+
+    pid = lambda p: "p_" + re.sub(r"[^A-Za-z0-9_]", "_", p)  # noqa: E731
+    pkg_mm = ["flowchart LR"]
+    versions = {p["package"]: p.get("version", "") for p in pkgs}
+    declared = set()
+    for p in sorted(scanned):
+        label = f"{p} {versions[p]}".strip()
+        pkg_mm.append(f'  {pid(p)}["{label}"]')
+    for p in sorted(scanned):
+        for r in sorted(requires[p]):
+            if r not in scanned and r not in declared:
+                pkg_mm.append(f'  {pid(r)}["{r} - not scanned"]')
+                declared.add(r)
+            pkg_mm.append(f"  {pid(p)} {'-->' if r in scanned else '-.->'} {pid(r)}")
+    for (a, b) in sorted(cross):
+        if b not in requires.get(a, set()):
+            pkg_mm.append(f'  {pid(a)} -->|"undeclared"| {pid(b)}')
+
+    comp = sorted(k for k in nodes if kind[k] != "Document type")
+    ext_count = len(eps_by) + len(access) + sum(len(v) for v in subs.values()) + len(external) \
+        + any(r.startswith("Entry: REST") for r in roles.values())
+    detailed = len(comp) + ext_count <= MAX_DIAGRAM_NODES
+    fid = lambda k: "fd_" + re.sub(r"[^A-Za-z0-9_]", "_", pkg_of[k] + "_" + nodes[k]["folder"])  # noqa: E731
+    node_of = mid if detailed else fid
+
+    def shape(k):
+        label = k.split(":")[-1]
+        m = REST_RE.search(k) if is_svc(k) else None
+        if m:
+            label += f" - REST {m.group(1).upper()}"
+        if kind[k] == "Trigger":
+            return f'{mid(k)}{{{{"{label}"}}}}'
+        if is_svc(k) and is_adapter(k):
+            return f'{mid(k)}[["{label}"]]'
+        if nodes[k]["svc_type"] == "java":
+            return f'{mid(k)}("{label}")'
+        return f'{mid(k)}["{label}"]'
+
+    comp_mm = ["flowchart LR"]
+    for p in sorted({pkg_of[k] for k in comp}):
+        comp_mm.append(f'  subgraph {pid("pk_" + p)}["Package {p}"]')
+        for f in sorted({nodes[k]["folder"] for k in comp if pkg_of[k] == p}):
+            members = [k for k in comp if pkg_of[k] == p and nodes[k]["folder"] == f]
+            if detailed:
+                comp_mm.append(f'    subgraph {fid(members[0])}["{f}"]')
+                comp_mm += [f"      {shape(k)}" for k in members]
+                comp_mm.append("    end")
+            else:
+                comp_mm.append(f'    {fid(members[0])}["{f} - {len(members)} component(s)"]')
+        comp_mm.append("  end")
+    edges = []
+    for t in triggers:
+        edges += [(node_of(t), node_of(s), "") for s in trig_targets[t]]
+    for k in comp:
+        for c in sorted(set((nodes[k].get("flow") or {}).get("invokes", []))):
+            if c in nodes:
+                edges.append((node_of(k), node_of(c), ""))
+    for i, (t, caps) in enumerate(sorted(access.items())):
+        comp_mm.append(f'  x_tbl_{i}[("{t} table")]')
+        for a, info in sorted(adapters.items()):
+            if t in info["tables"]:
+                edges.append((node_of(a), f"x_tbl_{i}", "/".join(info["operations"])))
+    for i, (e, ss) in enumerate(sorted(eps_by.items())):
+        comp_mm.append(f'  x_http_{i}(["HTTP {e}"])')
+        edges += [(node_of(s), f"x_http_{i}", "") for s in sorted(ss)]
+    j = 0
+    for t in triggers:
+        for d in subs[t]:
+            comp_mm.append(f'  x_pub_{j}(["Publisher of {d.split(":")[-1]}"])')
+            edges.append((f"x_pub_{j}", node_of(t), "publish"))
+            j += 1
+    rest = sorted(k for k in comp if roles[k].startswith("Entry: REST"))
+    if rest:
+        comp_mm.append('  x_rest(["REST clients"])')
+        edges += [("x_rest", node_of(k), "HTTP") for k in rest]
+    for i, (k, callers) in enumerate(sorted(external.items())):
+        comp_mm.append(f'  x_ext_{i}["{k} - outside scan"]')
+        edges += [(node_of(c), f"x_ext_{i}", "") for c in sorted(callers)]
+    seen = set()
+    for a, b, lbl in edges:
+        if a != b and (a, b, lbl) not in seen:
+            seen.add((a, b, lbl))
+            comp_mm.append(f'  {a} -->|"{lbl}"| {b}' if lbl else f"  {a} --> {b}")
+
+    return {
+        "roots": roots,
+        "roles": roles,
+        "capability_components": {r: sorted([s for s in reach[r] if s in nodes] + trig_of[r]) for r in roots},
+        "component_capabilities": {k: sorted(users.get(k, ())) for k in nodes},
+        "shared_components": sorted(k for k in nodes if len(users.get(k, ())) > 1 and kind[k] != "Document type"),
+        "doc_usage": doc_users,
+        "adapters": adapters,
+        "endpoints": endpoints,
+        "data_access": {t: {r: sorted(ops) for r, ops in caps.items()} for t, caps in access.items()},
+        "cross_package_calls": {f"{a} -> {b}": sorted(c) for (a, b), c in cross.items()},
+        "systems": [{"type": a, "detail": b, "used_by": c} for a, b, c in systems],
+        "observations": obs,
+        "package_mermaid": "\n".join(pkg_mm),
+        "component_mermaid": "\n".join(comp_mm),
+        "component_diagram_level": "component" if detailed else "folder",
+    }
+
+
+def architecture_md(arch, pkgs, nodes):
+    short = lambda r: r.split(":")[-1]  # noqa: E731
+    md = ["# Existing architecture (generated from code)", "",
+          "Facts for the FSD's Existing Architecture section. Capabilities are named by their entry service.", "",
+          "## Packages", "| Package | Version | Requires | Startup | Shutdown | Components |", "|---|---|---|---|---|---|"]
+    for p in pkgs:
+        md.append(f"| `{p['package']}` | {p.get('version', '')} | {', '.join(p['requires']) or '-'} | "
+                  f"{', '.join(p['startup']) or '-'} | {', '.join(p['shutdown']) or '-'} | {len(p['nodes'])} |")
+    md += ["", "## Package dependencies", "Solid arrow: declared dependency on a scanned package. Dotted: package "
+           "not scanned. Labelled `undeclared`: called but not declared.", "", "```mermaid", arch["package_mermaid"], "```"]
+    if arch["cross_package_calls"]:
+        md += ["", "| Calls across packages | Services |", "|---|---|"]
+        md += [f"| {k} | {'; '.join(v)} |" for k, v in sorted(arch["cross_package_calls"].items())]
+    md += ["", "## Components", "| Component | Package | Kind | Role | Used by capabilities |", "|---|---|---|---|---|"]
+    for k in sorted(nodes):
+        md.append(f"| `{k}` | {nodes[k]['package']} | {kind_of(nodes[k])} | {arch['roles'][k]} | "
+                  f"{', '.join(f'`{short(r)}`' for r in arch['component_capabilities'][k]) or '-'} |")
+    md += ["", f"## Component diagram ({arch['component_diagram_level']} level)",
+           "Shapes: rectangle = flow service, rounded = Java service, double-bordered = adapter service, "
+           "hexagon = trigger, cylinder = database table, stadium = external system or caller.", "",
+           "```mermaid", arch["component_mermaid"], "```",
+           "", "## Capabilities and their components", "| Capability (entry) | Components |", "|---|---|"]
+    md += [f"| `{r}` | {', '.join(f'`{c}`' for c in comps)} |" for r, comps in sorted(arch["capability_components"].items())]
+    md += ["", "## Shared components (used by 2+ capabilities)"]
+    md += [f"- `{k}` ← {', '.join(f'`{short(r)}`' for r in arch['component_capabilities'][k])}"
+           for k in arch["shared_components"]] or ["- none"]
+    md += ["", "## External systems and channels", "| Type | Detail | Used by |", "|---|---|---|"]
+    md += [f"| {s['type']} | {s['detail']} | {', '.join(f'`{u}`' for u in s['used_by'])} |" for s in arch["systems"]]
+    roots = arch["roots"]
+    md += ["", "## Data access by capability", "| Table | " + " | ".join(f"`{short(r)}`" for r in roots) + " |",
+           "|---|" + "---|" * len(roots)]
+    for t, caps in sorted(arch["data_access"].items()):
+        md.append(f"| `{t}` | " + " | ".join("/".join(caps.get(r, [])) or "-" for r in roots) + " |")
+    md += ["", "## Document type usage", "| Document type | Used by |", "|---|---|"]
+    md += [f"| `{d}` | {', '.join(f'`{u}`' for u in us) or 'unused'} |" for d, us in sorted(arch["doc_usage"].items())]
+    md += ["", "## Architecture observations (verify, then carry into the FSD)"]
+    md += [f"- {o}" for o in arch["observations"]] or ["- none"]
+    return md
+
+
 # ---------------------------------------------------------------- outputs
 def main():
     ap = argparse.ArgumentParser()
@@ -589,13 +874,18 @@ def main():
             integrations[f"Adapter service ({n['svc_type']})"].add(n["name"])
 
     flags = {name: semantic_flags(n, nodes, referenced) for name, n in nodes.items()}
+    arch = build_architecture(pkgs, nodes, referenced, entry, triggered, external)
 
     os.makedirs(os.path.join(a.out, "services"), exist_ok=True)
+    with open(os.path.join(a.out, "architecture.md"), "w", encoding="utf-8") as f:
+        f.write("\n".join(architecture_md(arch, pkgs, nodes)) + "\n")
 
     # per-node files
     for n in nodes.values():
         md = [f"# {n['name']}", "", f"- **Kind:** {kind_of(n)}", f"- **Package:** {n['package']}",
-              f"- **Source dir:** `{n['dir']}`"]
+              f"- **Role:** {arch['roles'][n['name']]}", f"- **Source dir:** `{n['dir']}`"]
+        if arch["component_capabilities"][n["name"]]:
+            md.append("- **Used by capabilities:** " + ", ".join(arch["component_capabilities"][n["name"]]))
         if n["comment"]:
             md.append(f"- **Developer comment:** {n['comment']}")
         if invoked_by.get(n["name"]):
@@ -634,9 +924,6 @@ def main():
             f.write("\n".join(md) + "\n")
 
     # call graphs
-    def mid(name):
-        return "s_" + re.sub(r"[^A-Za-z0-9_]", "_", name)
-
     def cg(root, depth=0, seen=None, lines=None, max_depth=6):
         seen, lines = (seen or set()), (lines if lines is not None else [])
         if root in seen or depth > max_depth:
@@ -673,6 +960,8 @@ def main():
             "## Calls to services outside scanned packages", *(f"- `{k}` ← {', '.join(sorted(v))}" for k, v in sorted(external.items())), "",
             "## Semantic flags (each must be addressed in the FSD)",
             *(f"- `{k}`: {x}" for k in sorted(flags) for x in flags[k]), "",
+            "## Architecture observations (details in architecture.md)",
+            *(f"- {o}" for o in arch["observations"]), "",
             "## All nodes", "| Name | Kind | Comment |", "|---|---|---|",
             *(f"| `{n['name']}` | {kind_of(n)} | {n['comment'][:80].replace(chr(10), ' ')} |" for n in sorted(nodes.values(), key=lambda x: x["name"]))]
     with open(os.path.join(a.out, "inventory.md"), "w", encoding="utf-8") as f:
@@ -683,7 +972,8 @@ def main():
             "entry_points": entry, "triggered": triggered,
             "integrations": {k: sorted(v) for k, v in integrations.items()},
             "external_calls": {k: sorted(v) for k, v in external.items()},
-            "semantic_flags": {k: v for k, v in sorted(flags.items()) if v}}
+            "semantic_flags": {k: v for k, v in sorted(flags.items()) if v},
+            "architecture": {k: v for k, v in arch.items() if not k.endswith("_mermaid")}}
     with open(os.path.join(a.out, "inventory.json"), "w", encoding="utf-8") as f:
         json.dump(slim, f, indent=2)
     print(f"Scanned {len(pkgs)} package(s), {len(nodes)} nodes, {len(entry)} entry points -> {a.out}")

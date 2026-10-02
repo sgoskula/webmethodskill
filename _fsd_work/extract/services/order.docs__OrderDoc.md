@@ -2,7 +2,9 @@
 
 - **Kind:** Document type
 - **Package:** OrderProcessing
+- **Role:** Data contract (document type)
 - **Source dir:** `sample/OrderProcessing/ns/order/docs/OrderDoc`
+- **Used by capabilities:** order.process:submitOrder
 - **Developer comment:** Canonical order document published by the storefront and consumed by order submission.
 - **Referenced by (trigger/REST/WSD/other):** order.process:validateOrder, order.triggers:orderTrigger
 

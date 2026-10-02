@@ -1,62 +1,290 @@
-# Functional Specification — OrderProcessing
+# Functional Specification — Order Management (OrderProcessing + CommonUtils)
 
 | Item | Value |
 |---|---|
-| Source packages | OrderProcessing 1.0 |
-| Generated from | Sample package at `sample/OrderProcessing` (synthetic test fixture for the `wm-fsd` agent/skill) |
+| Source packages | OrderProcessing 1.0, CommonUtils 1.0 |
+| Generated from | Sample packages in `sample/` (synthetic test fixture for the `wm-fsd` agent/skill) |
 | Status | Draft — reverse-engineered, pending SME review |
 
 ## 1. Introduction
 
-**1.1 Purpose** — Describes what the `OrderProcessing` webMethods Integration Server package
-actually does at runtime, so it can be signed off by the business and re-implemented in Java
-without opening Designer.
+**1.1 Purpose** — One overall specification of the order management application on webMethods
+Integration Server: how it is built today (Section 3), what each capability actually does at
+runtime (Section 5), and what a Java re-implementation must reproduce or decide (Section 12).
 
-**1.2 Scope** — In scope: everything inside the `OrderProcessing` package folder (1 flow service,
-1 Java service, 1 JDBC adapter service, 1 document type, 1 trigger). Not supplied: scheduler
-exports, global variables, JDBC connection settings (including transaction type), trigger "on
-retry failure" settings, and UM/Broker configuration. See Section 12 (Open Questions). Section 11
-covers the Java migration.
+**1.2 Scope** — In scope: all 12 components in the two packages:
+- 5 flow services
+- 1 Java service
+- 3 JDBC adapter services
+- 2 triggers
+- 2 document types
+
+Not supplied: scheduler exports, global variables, JDBC connection settings (including transaction
+type), trigger "on retry failure" settings, UM/Broker configuration, ACLs, and anything about the
+systems that publish the documents. See Section 13 (Open Questions).
 
 **1.3 Glossary**
 | Term | Meaning |
 |---|---|
 | IS | webMethods Integration Server |
+| Package | Deployable unit of IS components. Here `OrderProcessing` (business) and `CommonUtils` (shared) |
 | Flow service | Declarative webMethods service built from MAP, BRANCH, LOOP, INVOKE and similar steps |
 | Trigger | IS subscription that invokes a service when a matching document is published. The service's outputs are discarded |
-| `$default` | BRANCH case taken when no other case matches, including missing or non-numeric values |
+| REST resource | Folder with `_get`/`_post`/… services, exposed at `/rest/<folder path>` |
+| `$default` / `$null` | BRANCH cases: "any value no other case matched" / "variable missing" |
 | ISRuntimeException | The only kind of error that makes IS retry a trigger |
-| CAP-01 | Capability 1, Order Submission (the only capability in this package) |
+| CAP-01 / 02 / 03 | Order Submission / Order Cancellation / Order Status Lookup |
 
 ## 2. System Context
 
-`OrderProcessing` receives new orders published as `OrderDoc` documents. It marks orders over
-1000 for approval (and then stops), and validates and stores the rest in the `ORDERS` table
-before sending a charge request to a payment gateway. Nothing is published back.
+The application takes in new orders and cancellation requests as published documents, stores
+orders in the `ORDERS` table, charges new orders through a payment gateway, and answers order
+status queries over REST. It publishes nothing back, and writes audit lines to the IS server log.
 
 ```mermaid
 flowchart LR
-    Storefront["Storefront / upstream publisher"] -- "Publish: OrderDoc, status NEW" --> OP["OrderProcessing package"]
-    OP -- "JDBC INSERT, status PENDING" --> DB[("ORDERS table")]
-    OP -- "HTTP: charge request" --> PG["Payment gateway"]
+    Storefront["Storefront"] -- "Publish: OrderDoc, status NEW" --> APP["Order Management on IS"]
+    CS["Customer service"] -- "Publish: CancelDoc" --> APP
+    Clients["REST clients"] -- "HTTP GET /rest/order/api/orders" --> APP
+    APP -- "JDBC via OrderDB_Conn" --> DB[("ORDERS table")]
+    APP -- "HTTP: charge request" --> PG["Payment gateway"]
+    APP -- "pub.flow:debugLog" --> LOG["IS server log"]
 ```
 
-## 3. Capability Summary
+The publishers of `OrderDoc` and `CancelDoc` are inferred from the document comments
+`[TO CONFIRM: actual publishing systems]`.
+
+## 3. Existing Architecture
+
+**3.1 Overview** — The application is a small **event-driven order intake** with a
+**synchronous REST query**, built on webMethods Integration Server:
+- Two document triggers take in new orders and cancellation requests from publishers (publish/subscribe).
+- A legacy REST resource answers status queries.
+- All three capabilities read or write one relational table, `ORDERS`, through JDBC adapter
+  services on one shared connection, `OrderDB_Conn`.
+- The `OrderProcessing` package holds all business logic, layered by folder: `triggers`,
+  `api`, `process`, `jdbc`, `docs`.
+- A separate `CommonUtils` package provides one shared audit-logging service.
+- There is no orchestration across capabilities: each one is independent and coordinates with
+  the others only through the status column of `ORDERS` (3.6).
+
+**3.2 Package and dependency view**
+```mermaid
+flowchart LR
+  p_CommonUtils["CommonUtils 1.0"]
+  p_OrderProcessing["OrderProcessing 1.0"]
+  p_WmPublic["WmPublic - not scanned"]
+  p_CommonUtils -.-> p_WmPublic
+  p_OrderProcessing --> p_CommonUtils
+  p_OrderProcessing -.-> p_WmPublic
+```
+
+| Package | Purpose | Components | Depends on |
+|---|---|---|---|
+| `OrderProcessing` | Order business logic: triggers, REST resource, flow and Java services, adapters, document types | 11 | `WmPublic`, `CommonUtils` (both declared) |
+| `CommonUtils` | Shared audit logging | 1 (`common.util:logEvent`) | `WmPublic` |
+
+Both cross-package calls (`_get` and `cancelOrder` → `common.util:logEvent`) are declared in
+`manifest.v3`. There are no circular dependencies.
+
+**3.3 Component view**
+```mermaid
+flowchart LR
+  subgraph p_pk_CommonUtils["Package CommonUtils"]
+    subgraph fd_CommonUtils_common_util["common.util"]
+      s_common_util_logEvent["logEvent"]
+    end
+  end
+  subgraph p_pk_OrderProcessing["Package OrderProcessing"]
+    subgraph fd_OrderProcessing_order_api_orders["order.api.orders"]
+      s_order_api_orders__get["_get - REST GET"]
+    end
+    subgraph fd_OrderProcessing_order_jdbc["order.jdbc"]
+      s_order_jdbc_insertOrder[["insertOrder"]]
+      s_order_jdbc_selectOrder[["selectOrder"]]
+      s_order_jdbc_updateOrderStatus[["updateOrderStatus"]]
+    end
+    subgraph fd_OrderProcessing_order_process["order.process"]
+      s_order_process_cancelOrder["cancelOrder"]
+      s_order_process_submitOrder["submitOrder"]
+      s_order_process_validateOrder("validateOrder")
+    end
+    subgraph fd_OrderProcessing_order_triggers["order.triggers"]
+      s_order_triggers_cancelTrigger{{"cancelTrigger"}}
+      s_order_triggers_orderTrigger{{"orderTrigger"}}
+    end
+  end
+  x_tbl_0[("ORDERS table")]
+  x_http_0(["Payment gateway"])
+  x_pub_0(["Publisher of CancelDoc"])
+  x_pub_1(["Publisher of OrderDoc"])
+  x_rest(["REST clients"])
+  s_order_triggers_cancelTrigger --> s_order_process_cancelOrder
+  s_order_triggers_orderTrigger --> s_order_process_submitOrder
+  s_order_api_orders__get --> s_common_util_logEvent
+  s_order_api_orders__get --> s_order_jdbc_selectOrder
+  s_order_process_cancelOrder --> s_common_util_logEvent
+  s_order_process_cancelOrder --> s_order_jdbc_updateOrderStatus
+  s_order_process_submitOrder --> s_order_jdbc_insertOrder
+  s_order_process_submitOrder --> s_order_process_validateOrder
+  s_order_jdbc_insertOrder -->|"INSERT"| x_tbl_0
+  s_order_jdbc_selectOrder -->|"SELECT"| x_tbl_0
+  s_order_jdbc_updateOrderStatus -->|"UPDATE"| x_tbl_0
+  s_order_process_submitOrder -->|"HTTP"| x_http_0
+  x_pub_0 -->|"publish"| s_order_triggers_cancelTrigger
+  x_pub_1 -->|"publish"| s_order_triggers_orderTrigger
+  x_rest -->|"HTTP GET"| s_order_api_orders__get
+```
+Shapes: rectangle = flow service, rounded = Java service, double-bordered = adapter, hexagon =
+trigger, cylinder = table, stadium = external system or caller.
+
+| Layer | Components | Responsibility |
+|---|---|---|
+| Entry / channel | `order.triggers:orderTrigger`, `order.triggers:cancelTrigger`, `order.api.orders:_get` | Receive published documents and REST requests |
+| Orchestration | `order.process:submitOrder`, `order.process:cancelOrder`, `order.api.orders:_get` | Sequence the steps of each capability (the REST resource is both entry and orchestration) |
+| Business logic | `order.process:validateOrder` (Java) | Order field validation |
+| Data access | `order.jdbc:insertOrder`, `order.jdbc:updateOrderStatus`, `order.jdbc:selectOrder` | SQL against `ORDERS` via `OrderDB_Conn` |
+| Shared utility | `common.util:logEvent` | Audit line to the server log |
+| Data contracts | `order.docs:OrderDoc`, `order.docs:CancelDoc` | Inbound document formats |
+
+**3.4 Runtime and integration view**
+| Channel / system | Direction | Protocol | Sync/async | Components | Capabilities |
+|---|---|---|---|---|---|
+| Publisher of `OrderDoc` (storefront) | Inbound | Publish/subscribe, filter `status == 'NEW'`, serial | Async | `orderTrigger` | CAP-01 |
+| Publisher of `CancelDoc` (customer service) | Inbound | Publish/subscribe, no filter, concurrent (4 threads) | Async | `cancelTrigger` | CAP-02 |
+| REST clients | Inbound | HTTP `GET /rest/order/api/orders?orderId=` | Sync | `order.api.orders:_get` | CAP-03 |
+| `ORDERS` table | Outbound | JDBC, connection `OrderDB_Conn` | Sync | 3 adapters | All |
+| Payment gateway | Outbound | HTTP, hard-coded URL | Sync | `submitOrder` | CAP-01 |
+| IS server log | Outbound | `pub.flow:debugLog`, function `ORDER_AUDIT` | Sync | `logEvent` | CAP-02, CAP-03 |
+
+The concurrency of `cancelTrigger` and the publisher names come from the trigger properties and
+document comments `[TO CONFIRM against the IS trigger settings]`.
+
+End-to-end order lifecycle across the three capabilities:
+```mermaid
+sequenceDiagram
+    participant SF as "Storefront"
+    participant CS as "Customer service"
+    participant RC as "REST client"
+    participant IS as "Order Management on IS"
+    participant DB as "ORDERS"
+    participant PG as "Payment gateway"
+
+    SF->>IS: OrderDoc, CAP-01
+    IS->>DB: INSERT with status PENDING
+    IS->>PG: charge request
+    Note over IS,DB: status never updated after the charge
+    RC->>IS: GET /rest/order/api/orders?orderId=X, CAP-03
+    IS->>DB: SELECT by ORDER_ID
+    IS-->>RC: 200 with status PENDING
+    CS->>IS: CancelDoc, CAP-02
+    IS->>DB: UPDATE to CANCELLED where status is PENDING
+    Note over IS,PG: no refund and no call to the gateway on cancel
+```
+
+**3.5 Capability-to-component matrix**
+| Component | CAP-01 Submission | CAP-02 Cancellation | CAP-03 Status lookup |
+|---|---|---|---|
+| `order.triggers:orderTrigger` | ✔ | | |
+| `order.triggers:cancelTrigger` | | ✔ | |
+| `order.api.orders:_get` | | | ✔ |
+| `order.process:submitOrder` | ✔ | | |
+| `order.process:cancelOrder` | | ✔ | |
+| `order.process:validateOrder` | ✔ | | |
+| `order.jdbc:insertOrder` | ✔ | | |
+| `order.jdbc:updateOrderStatus` | | ✔ | |
+| `order.jdbc:selectOrder` | | | ✔ |
+| `common.util:logEvent` | | ✔ | ✔ |
+| `order.docs:OrderDoc` | ✔ | | |
+| `order.docs:CancelDoc` | | ✔ | |
+
+`common.util:logEvent` is the only component shared by more than one capability. The shared
+**data** (`ORDERS`) couples all three.
+
+**3.6 Data ownership and entity lifecycle — `ORDERS`**
+
+| Operation | CAP-01 Submission | CAP-02 Cancellation | CAP-03 Status lookup |
+|---|---|---|---|
+| Create | INSERT, status `PENDING` | | |
+| Read | | | SELECT by `ORDER_ID` |
+| Update | | `STATUS` `PENDING` → `CANCELLED` (`WHERE STATUS = 'PENDING'`) | |
+| Delete | | | |
+
+No capability owns the table outright: CAP-01 creates rows, CAP-02 changes them, and CAP-03
+exposes them.
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING : CAP-01 inserts a validated order
+    PENDING --> PENDING : CAP-01 charges, status not updated
+    PENDING --> CANCELLED : CAP-02 cancel request
+    CANCELLED --> [*]
+    note right of PENDING
+        CONFIRMED, FAILED and PENDING_APPROVAL are set in memory by CAP-01 but never stored
+    end note
+```
+
+**How the capabilities behave together** (these findings only appear when they are read side by side):
+1. **A paid order can be cancelled with no refund.** CAP-01 leaves every order `PENDING`, even
+   after a charge request. CAP-02 cancels any `PENDING` row and makes no gateway call.
+   (`order.process:submitOrder`, `order.process:cancelOrder`)
+2. **Status lookups never show the real outcome.** CAP-03 returns `PENDING` for paid orders and
+   orders whose charge was declined alike. `CONFIRMED` and `FAILED` can never appear.
+   (`order.api.orders:_get`)
+3. **High-value orders are invisible.** Orders over 1000 are never stored by CAP-01, so CAP-03
+   returns 404 for them and CAP-02 rejects their cancellation.
+4. **A cancellation can be lost.** The two triggers are independent, and `cancelTrigger` runs
+   4 threads in parallel. If a `CancelDoc` is processed before the matching `OrderDoc` has been
+   inserted, the UPDATE matches 0 rows, CAP-02 fails, and the trigger does not retry it. The
+   order is then created as `PENDING` and stays active. `[TO CONFIRM: ordering guarantees between
+   the two publishers]`
+5. **A cancel during payment still charges.** If CAP-02 runs between CAP-01's INSERT and its
+   charge request, the row becomes `CANCELLED`, but CAP-01 still charges the customer.
+6. **Duplicate rows break the lookup.** If an `OrderDoc` is redelivered and `ORDER_ID` isn't
+   unique, CAP-03 gets several rows; which one it returns is unclear. `[TO CONFIRM]`
+7. **Dead-end state.** `PENDING` can only be left by cancelling. Nothing moves an order forward.
+
+**3.7 Cross-cutting patterns**
+| Concern | CAP-01 Submission | CAP-02 Cancellation | CAP-03 Status lookup | Consistent? |
+|---|---|---|---|---|
+| Error handling | TRY/CATCH around validate + insert. Error details dropped. Payment errors uncaught | No TRY/CATCH. Adapter errors propagate. "Not cancellable" → `EXIT FAILURE` | No TRY/CATCH. Adapter errors propagate (HTTP 500 `[TO CONFIRM]`). 400/404 set explicitly | No |
+| Logging / audit | None | Both outcomes logged via `logEvent` | Only successful lookups logged. 400/404 not logged | No |
+| Retries | HTTP charge: up to 4 attempts, 5 s apart. Trigger retries never effective | None (trigger retries 0) | None | No |
+| Transactions | Implicit, via `OrderDB_Conn` type | Same | Same (read only) | Yes, but type unknown |
+| Configuration | Hard-coded gateway URL | Literal statuses | None | Partly |
+| Security | Not visible | Not visible | REST ACL not visible in the package `[TO CONFIRM]`. Returns `amount` to any caller who knows an `orderId` | Unknown |
+| Concurrency | Serial trigger | Concurrent trigger (4) | Per HTTP request | No |
+
+**3.8 Architecture observations and risks**
+| # | Observation | Evidence | Impact | Related question / decision |
+|---|---|---|---|---|
+| A1 | `ORDERS` is shared by all three capabilities, and its status lifecycle is incomplete | Data access matrix (3.6). No UPDATE in CAP-01 | Paid orders can be cancelled without refund. Lookups show stale status | Q3, Q14, D1, D9 |
+| A2 | Cancel and submit can race | Separate triggers, `cancelTrigger` concurrent, no retry | Cancellations lost. Cancelled orders charged | Q15, D10 |
+| A3 | Logging is inconsistent | CAP-01 has no logging. CAP-03 logs only successful lookups | No audit trail for submissions or failed queries | D12 |
+| A4 | Error handling is inconsistent | Only CAP-01 uses TRY/CATCH, and it drops the cause | Hard to diagnose failures. Mixed caller experience | D6, D12 |
+| A5 | Hard-coded payment URL | `order.process:submitOrder` | Environment changes need a code change | Q10 |
+| A6 | One connection for everything | All 3 adapters use `OrderDB_Conn` | Its transaction type decides rollback behaviour, and its pool size limits all capabilities | Q2 |
+| A7 | REST resource security is not visible in the package | No ACL in the `order.api.orders` node | Order data may be exposed without authentication | Q12, D11 |
+| A8 | Who cancelled is never recorded | `CancelDoc.requestedBy` is never read | No accountability for cancellations | Q19 |
+
+## 4. Capability Summary
 | ID | Capability | Entry point | Initiated by | Frequency / volume |
 |---|---|---|---|---|
-| CAP-01 | Order Submission | `order.process:submitOrder` | Trigger `order.triggers:orderTrigger` on `order.docs:OrderDoc` (filter `status == 'NEW'`) | `[TO CONFIRM: volume not visible in code]` |
+| CAP-01 | Order Submission | `order.process:submitOrder` | Trigger `order.triggers:orderTrigger` on `order.docs:OrderDoc` (filter `status == 'NEW'`) | `[TO CONFIRM]` |
+| CAP-02 | Order Cancellation | `order.process:cancelOrder` | Trigger `order.triggers:cancelTrigger` on `order.docs:CancelDoc` | `[TO CONFIRM]` |
+| CAP-03 | Order Status Lookup | `order.api.orders:_get` | REST client: `GET /rest/order/api/orders?orderId=` | `[TO CONFIRM]` |
 
-## 4. Capabilities
+## 5. Capabilities
 
-### 4.1 CAP-01 Order Submission
+### 5.1 CAP-01 Order Submission
 
-**4.1.1 Overview** — Receives a new customer order published as an `OrderDoc`. Orders over 1000
+**5.1.1 Overview** — Receives a new customer order published as an `OrderDoc`. Orders over 1000
 are marked for manual approval and processing stops. Other orders are validated, inserted into the
 `ORDERS` table and charged through a payment gateway. What actually results: at most one `ORDERS`
 row, always with status `PENDING`, plus charge requests to the gateway. The final status and
-confirmation number are calculated but never stored or sent anywhere (see 4.1.12).
+confirmation number are calculated but never stored or sent anywhere (see 5.1.12).
 
-**4.1.2 Trigger** — Document trigger `order.triggers:orderTrigger`, subscribed to
+**5.1.2 Trigger** — Document trigger `order.triggers:orderTrigger`, subscribed to
 `order.docs:OrderDoc`, filter `status == 'NEW'`, processing documents **serially** (one at a
 time) (`order.triggers:orderTrigger`). The trigger is configured for 3 retries 5 s apart, but
 Integration Server retries only when the service throws an ISRuntimeException. `submitOrder`
@@ -65,7 +293,7 @@ the trigger (`order.triggers:orderTrigger`, `order.process:submitOrder`).
 `[TO CONFIRM: the trigger's "on retry failure" setting, and whether the JDBC adapter reports
 transient database errors as retryable.]`
 
-**4.1.3 Inputs / Outputs**
+**5.1.3 Inputs / Outputs**
 | Direction | Field | Type | Mandatory | Description / allowed values | Source |
 |---|---|---|---|---|---|
 | In | `order` | `order.docs:OrderDoc` | Yes | The order to submit | `order.process:submitOrder` |
@@ -82,7 +310,7 @@ Because a trigger invokes the service, Integration Server discards all three out
 receives them. `[TO CONFIRM: should the status or confirmation number reach the storefront or
 customer?]`
 
-**4.1.4 Sequence diagram**
+**5.1.4 Sequence diagram**
 ```mermaid
 sequenceDiagram
     participant T as "orderTrigger"
@@ -124,15 +352,15 @@ sequenceDiagram
     end
 ```
 
-**4.1.5 Processing logic**
+**5.1.5 Processing logic**
 1. Copy `orderId`, `customerId` and `amount` from the input order into working variables and
    set `status = "PENDING"` (`order.process:submitOrder`).
-2. Check the order amount against the approval threshold (see 4.1.6). This happens **before**
+2. Check the order amount against the approval threshold (see 5.1.6). This happens **before**
    validation. If the order needs approval, set `status = "PENDING_APPROVAL"` and end the service
    successfully. Nothing is stored, published or returned, so the order is effectively dropped
    (`order.process:submitOrder`). `[TO CONFIRM: where are high-value orders approved?]`
 3. Otherwise, validate and save the order:
-   1. Validate the order (`order.process:validateOrder`), see 4.1.7.
+   1. Validate the order (`order.process:validateOrder`), see 5.1.7.
    2. For each order line, calculate `qty × price` with floating-point arithmetic and collect the
       results into `lineAmounts` (`order.process:submitOrder`, via `pub.math:multiplyFloats`).
       `lineAmounts` is **never used afterwards**: it isn't stored, and it isn't compared with
@@ -150,19 +378,19 @@ sequenceDiagram
    successfully (`order.process:submitOrder`). Neither value is stored, and both outputs are
    discarded, so the `ORDERS` row keeps status `PENDING`.
 
-**4.1.6 Business rules & decision tables**
+**5.1.6 Business rules & decision tables**
 | Rule ID | Condition | Outcome | Source |
 |---|---|---|---|
 | CAP-01-R1 | `amount > 1000` (raw: `%amount% > 1000`) | `status = PENDING_APPROVAL`, the service ends successfully. Nothing is stored, charged, published or returned | `order.process:submitOrder` |
-| CAP-01-R2 | Any other value (`$default`): 1000 or less, **and also** missing, empty or non-numeric amounts | Continue to validation, saving and payment. Non-numeric, zero and negative amounts then fail validation (4.1.7) | `order.process:submitOrder` |
+| CAP-01-R2 | Any other value (`$default`): 1000 or less, **and also** missing, empty or non-numeric amounts | Continue to validation, saving and payment. Non-numeric, zero and negative amounts then fail validation (5.1.7) | `order.process:submitOrder` |
 
 [TO CONFIRM: how Integration Server evaluates `%amount% > 1000` when `amount` is a string,
 e.g. "1000.50", "1,200" or "abc".] The boundary value 1000 itself follows R2.
 
-**4.1.7 Validations**
+**5.1.7 Validations**
 | Field | Check | On failure | Source |
 |---|---|---|---|
-| `order/orderId` | Must be present and not blank | `ServiceException("orderId is required")` → CATCH → service fails (4.1.10) | `order.process:validateOrder` |
+| `order/orderId` | Must be present and not blank | `ServiceException("orderId is required")` → CATCH → service fails (5.1.10) | `order.process:validateOrder` |
 | `order/amount` | Must parse as a number (`Double.parseDouble`) | `ServiceException("amount must be numeric")` → CATCH → service fails | `order.process:validateOrder` |
 | `order/amount` | Must be greater than 0 | `ServiceException("amount must be greater than zero")` → CATCH → service fails | `order.process:validateOrder` |
 | `order/customerId`, `order/lines` | **Not validated** | A missing customer or empty line list is saved as-is | `order.process:validateOrder` |
@@ -170,7 +398,7 @@ e.g. "1000.50", "1,200" or "abc".] The boundary value 1000 itself follows R2.
 The three validation messages never reach anyone: CATCH replaces them with the generic failure
 message without logging them.
 
-**4.1.8 Data mappings**
+**5.1.8 Data mappings**
 | Target | Source | Transformation / default | Source service |
 |---|---|---|---|
 | `orderId` | `order/orderId` | copy | `order.process:submitOrder` |
@@ -182,13 +410,13 @@ message without logging them.
 | HTTP body `data/orderId`, `data/amount` | `orderId`, `amount` | copy | `order.process:submitOrder` |
 | `confirmationNumber` | `orderId` | `"%orderId%-CONF"` (pipeline variable substitution). **Discarded** | `order.process:submitOrder` |
 
-**4.1.9 Integrations used**
+**5.1.9 Integrations used**
 | System | Protocol / adapter | Operation / SQL / endpoint | Direction | Sync/async | Source |
 |---|---|---|---|---|---|
 | `ORDERS` table (connection alias `OrderDB_Conn`) | JDBC adapter | `INSERT INTO ORDERS (ORDER_ID, CUSTOMER_ID, AMOUNT, STATUS) VALUES (?, ?, ?, ?)` | Outbound | Sync | `order.jdbc:insertOrder` |
 | Payment gateway | HTTP (`pub.client:http`) | URL `https://payments.internal/charge`, body fields `orderId`, `amount`. Method, headers, auth and timeout aren't set in the flow `[TO CONFIRM]` | Outbound | Sync, repeated on transport failure | `order.process:submitOrder` |
 
-**4.1.10 Error handling & retries**
+**5.1.10 Error handling & retries**
 | Scenario | Detection | Action | Retry policy | Message / code | Final outcome |
 |---|---|---|---|---|---|
 | Validation fails | `ServiceException` from `order.process:validateOrder`, caught by TRY/CATCH | `pub.flow:getLastError` (result unused), `status = FAILED` (not stored), `EXIT FAILURE` | None. Not retried by the trigger | "Order could not be validated or persisted" (the specific reason is lost) | Nothing stored, nothing charged |
@@ -196,7 +424,7 @@ message without logging them.
 | Gateway unreachable (connection error, timeout) | `pub.client:http` throws | Re-run the call | Up to 4 attempts in total, 5 s apart | No CATCH covers this step, so the error propagates uncaught | Service fails. Whether the `PENDING` row stays depends on the transaction type of `OrderDB_Conn`: NO_TRANSACTION keeps it, LOCAL/XA rolls it back `[TO CONFIRM]`. The customer is not charged |
 | Gateway returns an HTTP error (4xx/5xx, e.g. declined) | **Not detected**: the status code is never checked | Continues as success | No retry | None | Service succeeds, the row stays `PENDING`, and the customer may not have been charged |
 
-**4.1.11 Process flowchart**
+**5.1.11 Process flowchart**
 ```mermaid
 flowchart TD
     A(["OrderDoc received, status = NEW"]) --> B["Seed orderId, customerId, amount. status = PENDING"]
@@ -216,7 +444,7 @@ flowchart TD
     L --> M(["End: success, outputs discarded"])
 ```
 
-**4.1.12 Notes**
+**5.1.12 Notes**
 - **Database status never changes from `PENDING`.** The status is saved at insert time, and the
   later `CONFIRMED` / `FAILED` values are never written (`order.process:submitOrder`).
 - **Outputs are discarded.** Because a trigger invokes the service, `status` and
@@ -233,13 +461,264 @@ flowchart TD
   monetary values.
 - **Hard-coded endpoint.** The gateway URL `https://payments.internal/charge` is a literal in the
   flow, not an endpoint alias.
+- **Interaction with other capabilities (see 3.6).** Because the row stays `PENDING`, CAP-02 can
+  cancel an order that has already been charged, and CAP-03 reports `PENDING` for paid orders.
 - No step is `DISABLED`.
 
-## 5. Common Services
-None. The package has no shared logging, formatting or auditing services. There is also no
-logging at all, so failures leave no trace in the package itself.
+### 5.2 CAP-02 Order Cancellation
 
-## 6. Data Dictionary
+**5.2.1 Overview** — Receives a cancellation request published as a `CancelDoc` and changes the
+order's status in `ORDERS` from `PENDING` to `CANCELLED`. If no `PENDING` order matches, it logs a
+rejection and fails. What actually results: at most an UPDATE of `ORDERS.STATUS` and one audit
+line. There is no refund or call to the payment gateway, and who asked for the cancellation is
+not recorded.
+
+**5.2.2 Trigger** — Document trigger `order.triggers:cancelTrigger`, subscribed to
+`order.docs:CancelDoc`, no filter, processing **concurrently** with up to 4 threads, retries set
+to 0 (`order.triggers:cancelTrigger`). Even with retries configured, IS would only retry an
+ISRuntimeException, which `cancelOrder` never throws. A failed cancellation is therefore never
+retried. `[TO CONFIRM: trigger "on retry failure" setting and the real concurrency settings.]`
+
+**5.2.3 Inputs / Outputs**
+| Direction | Field | Type | Mandatory | Description / allowed values | Source |
+|---|---|---|---|---|---|
+| In | `cancel` | `order.docs:CancelDoc` | Yes | The cancellation request | `order.process:cancelOrder` |
+| In | `cancel/orderId` | string | Not validated | Order to cancel. Used in the UPDATE's WHERE clause | `order.docs:CancelDoc` |
+| In | `cancel/reason` | string | No | Written to the audit line | `order.docs:CancelDoc` |
+| In | `cancel/requestedBy` | string | — | **Never used**: not stored, not logged | `order.docs:CancelDoc` |
+| Out | — | — | — | The service declares no outputs | `order.process:cancelOrder` |
+
+**5.2.4 Sequence diagram**
+```mermaid
+sequenceDiagram
+    participant P as "Customer service publisher"
+    participant T as "cancelTrigger"
+    participant C as "cancelOrder"
+    participant DB as "ORDERS (JDBC)"
+    participant L as "logEvent"
+
+    P->>T: CancelDoc
+    T->>C: cancel document, up to 4 in parallel
+    C->>DB: UPDATE STATUS to CANCELLED where ORDER_ID matches and STATUS is PENDING
+    alt database error
+        DB-->>C: SQL error
+        C-->>T: uncaught FAILURE, nothing logged, not retried
+    else rows updated is 0
+        C->>L: CANCEL_REJECTED, not found or not PENDING
+        C-->>T: FAILURE Order not found or not cancellable, not retried
+    else any other count
+        C->>L: ORDER_CANCELLED with reason
+        C-->>T: success
+    end
+```
+
+**5.2.5 Processing logic**
+1. Update the order: `UPDATE ORDERS SET STATUS = 'CANCELLED' WHERE ORDER_ID = <cancel/orderId>
+   AND STATUS = 'PENDING'`, and keep the affected row count as `rowsUpdated`
+   (`order.process:cancelOrder` → `order.jdbc:updateOrderStatus`).
+2. Decide on the row count (see 5.2.6):
+   1. Count `0`: write audit line `CANCEL_REJECTED order=<id> not found or not PENDING` and end
+      the service with failure "Order not found or not cancellable" (`order.process:cancelOrder`,
+      `common.util:logEvent`).
+   2. Any other value: write audit line `ORDER_CANCELLED order=<id> <reason>` and end successfully
+      (`order.process:cancelOrder`, `common.util:logEvent`).
+
+**5.2.6 Business rules & decision tables**
+| Rule ID | Condition | Outcome | Source |
+|---|---|---|---|
+| CAP-02-R1 | `rowsUpdated = "0"`: no row with that `ORDER_ID` **and** status `PENDING`. This covers unknown ids, orders already `CANCELLED`, orders over 1000 that CAP-01 never stored, and a missing `orderId` | Log `CANCEL_REJECTED`, service fails "Order not found or not cancellable", not retried | `order.process:cancelOrder` |
+| CAP-02-R2 | Any other value (`$default`): 1, or more than 1 if duplicate rows exist | Log `ORDER_CANCELLED` with the reason, service succeeds | `order.process:cancelOrder` |
+
+Only `PENDING` orders can be cancelled. Because CAP-01 never moves an order past `PENDING`, that
+means every stored order, including ones already charged (3.6, finding 1).
+
+**5.2.7 Validations**
+| Field | Check | On failure | Source |
+|---|---|---|---|
+| `cancel/orderId` | **None.** A missing id matches no row (SQL `= NULL` is never true) and falls under R1 `[TO CONFIRM: adapter behaviour with a null input]` | — | `order.process:cancelOrder` |
+| `cancel/reason`, `cancel/requestedBy` | None | — | `order.process:cancelOrder` |
+
+**5.2.8 Data mappings**
+| Target | Source | Transformation / default | Source service |
+|---|---|---|---|
+| UPDATE `ORDER_ID` parameter | `cancel/orderId` | copy | `order.process:cancelOrder` → `order.jdbc:updateOrderStatus` |
+| UPDATE new `STATUS` | literal | `"CANCELLED"` | same |
+| UPDATE expected `STATUS` | literal | `"PENDING"` | same |
+| `rowsUpdated` | adapter `updateCount` | copy (string) | `order.process:cancelOrder` |
+| Audit `eventType` | literal | `"CANCEL_REJECTED"` (R1) or `"ORDER_CANCELLED"` (R2) | `order.process:cancelOrder` |
+| Audit `orderId` | `cancel/orderId` | copy | `order.process:cancelOrder` |
+| Audit `message` | literal or `cancel/reason` | R1: `"not found or not PENDING"`. R2: the reason, possibly missing | `order.process:cancelOrder` |
+
+**5.2.9 Integrations used**
+| System | Protocol / adapter | Operation / SQL / endpoint | Direction | Sync/async | Source |
+|---|---|---|---|---|---|
+| `ORDERS` table (`OrderDB_Conn`) | JDBC adapter | `UPDATE ORDERS SET STATUS = ? WHERE ORDER_ID = ? AND STATUS = ?` | Outbound | Sync | `order.jdbc:updateOrderStatus` |
+| IS server log | `pub.flow:debugLog` via `common.util:logEvent` | function `ORDER_AUDIT`, level `Info` | Outbound | Sync | `common.util:logEvent` |
+
+**5.2.10 Error handling & retries**
+| Scenario | Detection | Action | Retry policy | Message / code | Final outcome |
+|---|---|---|---|---|---|
+| No `PENDING` order matches | `rowsUpdated = "0"` | Log `CANCEL_REJECTED`, `EXIT FAILURE` | None (trigger retries 0, and not an ISRuntimeException) | "Order not found or not cancellable" | Nothing changed. The request is lost. If the order arrives later (3.6, finding 4) it stays active |
+| Database error | Exception from `order.jdbc:updateOrderStatus`, no TRY/CATCH | Propagates to the trigger | None | IS error | Nothing changed (or rolled back), nothing logged, request lost |
+
+**5.2.11 Process flowchart**
+```mermaid
+flowchart TD
+    A(["CancelDoc received"]) --> B["Set status to CANCELLED where the order is PENDING"]
+    B -->|"database error"| X(["End: uncaught failure, nothing logged, not retried"])
+    B --> C{"Rows updated = 0?"}
+    C -->|"Yes"| D["Log CANCEL_REJECTED"]
+    D --> E(["End: failure, Order not found or not cancellable"])
+    C -->|"Any other value"| F["Log ORDER_CANCELLED with reason"]
+    F --> G(["End: success"])
+```
+
+**5.2.12 Notes**
+- **No refund or payment reversal.** Cancelling a charged order doesn't contact the payment
+  gateway (3.6, finding 1).
+- **`requestedBy` is never used**, so there is no record of who cancelled an order.
+- **Missing reason.** If `reason` is absent, the audit line is built from `%message%` with no value
+  `[TO CONFIRM: whether IS substitutes an empty string or leaves the literal]`.
+- **Races with CAP-01.** See 3.6, findings 4 and 5.
+- No step is `DISABLED`.
+
+### 5.3 CAP-03 Order Status Lookup
+
+**5.3.1 Overview** — A REST resource that returns the identifier, status and amount of one order.
+It answers 400 if the `orderId` parameter is missing, 404 if no row matches, and 200 with the
+order otherwise. It reads `ORDERS` only. Only successful lookups are written to the audit log.
+Because of how the other capabilities write the table, the status returned is always `PENDING`
+or `CANCELLED` (3.6, finding 2).
+
+**5.3.2 Trigger** — Legacy REST resource `order.api.orders:_get`, i.e.
+`GET /rest/order/api/orders?orderId=<id>` (`order.api.orders:_get`). The query parameter arrives
+as the pipeline input `orderId`, the output pipeline becomes the response body, and
+`pub.flow:setResponseCode` sets non-200 statuses.
+`[TO CONFIRM: ACL / authentication on the resource, and response format (JSON or XML by Accept
+header).]`
+
+**5.3.3 Inputs / Outputs**
+| Direction | Field | Type | Mandatory | Description / allowed values | Source |
+|---|---|---|---|---|---|
+| In | `orderId` (query parameter) | string | Optional in the signature, required by the logic | Order to look up | `order.api.orders:_get` |
+| Out | HTTP status | — | — | `200` (default), `400 Bad Request`, `404 Not Found`. Error on database failure `[TO CONFIRM]` | `order.api.orders:_get` |
+| Out | `order/orderId`, `order/status`, `order/amount` | string | On 200 | From `ORDERS.ORDER_ID`, `STATUS`, `AMOUNT` | `order.api.orders:_get` |
+| Out | `error` | string | On 400/404 | `"orderId is required"` or `"Order not found"` | `order.api.orders:_get` |
+
+The response goes to the REST caller (unlike the trigger-invoked capabilities).
+
+**5.3.4 Sequence diagram**
+```mermaid
+sequenceDiagram
+    participant RC as "REST client"
+    participant G as "_get"
+    participant DB as "ORDERS (JDBC)"
+    participant L as "logEvent"
+
+    RC->>G: GET /rest/order/api/orders?orderId=X
+    alt orderId parameter missing
+        G-->>RC: 400 Bad Request, error orderId is required
+    else orderId present, including empty
+        G->>DB: SELECT ORDER_ID, CUSTOMER_ID, AMOUNT, STATUS WHERE ORDER_ID = X
+        alt database error
+            DB-->>G: SQL error
+            G-->>RC: error response, HTTP 500 assumed
+        else no rows
+            G-->>RC: 404 Not Found, error Order not found
+        else one or more rows
+            G->>L: ORDER_QUERY for X
+            G-->>RC: 200 with orderId, status and amount
+        end
+    end
+```
+
+**5.3.5 Processing logic**
+1. If the `orderId` parameter is missing (`$null`), set the response to `400 Bad Request`, set
+   `error = "orderId is required"` and end. An empty value (`?orderId=`) is **not** `$null` and
+   carries on (`order.api.orders:_get`).
+2. Read the order: `SELECT ORDER_ID, CUSTOMER_ID, AMOUNT, STATUS FROM ORDERS WHERE ORDER_ID = ?`
+   (`order.jdbc:selectOrder`).
+3. Count the rows returned (`pub.list:sizeOfList`).
+4. If there are 0 rows, set the response to `404 Not Found`, set `error = "Order not found"` and
+   end (`order.api.orders:_get`).
+5. Otherwise copy `ORDER_ID`, `STATUS` and `AMOUNT` into `order`. `CUSTOMER_ID` is selected but not
+   returned (`order.api.orders:_get`). `[TO CONFIRM: which row is returned when several match]`
+6. Write audit line `ORDER_QUERY order=<id>` (no message) and return 200 with `order`
+   (`common.util:logEvent`).
+
+**5.3.6 Business rules & decision tables**
+| Rule ID | Condition | Outcome | Source |
+|---|---|---|---|
+| CAP-03-R1 | `orderId` missing (`$null`) | 400 Bad Request, `error = "orderId is required"`. No database read, no log | `order.api.orders:_get` |
+| CAP-03-R2 | Any other value (`$default`), **including an empty string** | Continue to the database read | `order.api.orders:_get` |
+| CAP-03-R3 | Row count `"0"` | 404 Not Found, `error = "Order not found"`. No log | `order.api.orders:_get` |
+| CAP-03-R4 | Any other row count (`$default`) | 200 with `order`, `ORDER_QUERY` logged | `order.api.orders:_get` |
+
+**5.3.7 Validations**
+| Field | Check | On failure | Source |
+|---|---|---|---|
+| `orderId` | Must be present | 400 (R1) | `order.api.orders:_get` |
+| `orderId` | **No** check for empty value or format | An empty id gives 404, not 400 | `order.api.orders:_get` |
+
+**5.3.8 Data mappings**
+| Target | Source | Transformation / default | Source service |
+|---|---|---|---|
+| SELECT `ORDER_ID` parameter | `orderId` | copy | `order.api.orders:_get` → `order.jdbc:selectOrder` |
+| `resultCount` | `pub.list:sizeOfList(results)` | row count | `order.api.orders:_get` |
+| `order/orderId` | `results/ORDER_ID` | copy | `order.api.orders:_get` |
+| `order/status` | `results/STATUS` | copy. Only `PENDING` or `CANCELLED` can exist (3.6) | `order.api.orders:_get` |
+| `order/amount` | `results/AMOUNT` | copy | `order.api.orders:_get` |
+| `error` | literal | `"orderId is required"` (R1), `"Order not found"` (R3) | `order.api.orders:_get` |
+| HTTP status | literal | `400 Bad Request` (R1), `404 Not Found` (R3) via `pub.flow:setResponseCode` | `order.api.orders:_get` |
+| Audit `eventType` / `orderId` | literal / `orderId` | `"ORDER_QUERY"`, request id | `order.api.orders:_get` |
+
+**5.3.9 Integrations used**
+| System | Protocol / adapter | Operation / SQL / endpoint | Direction | Sync/async | Source |
+|---|---|---|---|---|---|
+| REST clients | HTTP | `GET /rest/order/api/orders` | Inbound | Sync | `order.api.orders:_get` |
+| `ORDERS` table (`OrderDB_Conn`) | JDBC adapter | `SELECT ORDER_ID, CUSTOMER_ID, AMOUNT, STATUS FROM ORDERS WHERE ORDER_ID = ?` | Outbound | Sync | `order.jdbc:selectOrder` |
+| IS server log | `pub.flow:debugLog` via `common.util:logEvent` | function `ORDER_AUDIT`, level `Info` | Outbound | Sync | `common.util:logEvent` |
+
+**5.3.10 Error handling & retries**
+| Scenario | Detection | Action | Retry policy | Message / code | Final outcome |
+|---|---|---|---|---|---|
+| Parameter missing | `$null` on `orderId` | Set 400 and `error` | None | 400, "orderId is required" | No read, no log |
+| Order not found (or empty id) | Row count `0` | Set 404 and `error` | None | 404, "Order not found" | No log |
+| Database error | Exception from `order.jdbc:selectOrder`, no TRY/CATCH | Propagates to the REST layer | None | `[TO CONFIRM: HTTP 500 and whether the exception text is exposed to the caller]` | No log |
+
+**5.3.11 Process flowchart**
+```mermaid
+flowchart TD
+    A(["GET /rest/order/api/orders"]) --> B{"orderId parameter present?"}
+    B -->|"No"| C(["400: orderId is required"])
+    B -->|"Yes, including empty"| D["Read order from ORDERS"]
+    D -->|"database error"| X(["Error response, HTTP 500 assumed"])
+    D --> E{"Rows found = 0?"}
+    E -->|"Yes"| F(["404: Order not found"])
+    E -->|"Any other value"| G["Map orderId, status, amount"]
+    G --> H["Log ORDER_QUERY"]
+    H --> I(["200 with order"])
+```
+
+**5.3.12 Notes**
+- **Only successful lookups are logged.** 400, 404 and errors leave no audit line.
+- **Security not visible.** The resource returns `amount` to anyone who knows an `orderId`, and no
+  ACL appears in the package (3.8, A7).
+- **Stale status.** Paid orders show `PENDING`, and orders over 1000 return 404 (3.6).
+- **An empty `orderId` returns 404, not 400.**
+- `CUSTOMER_ID` is read but not returned.
+- No step is `DISABLED`.
+
+## 6. Common Services
+
+| Service | Package | Purpose | Used by |
+|---|---|---|---|
+| `common.util:logEvent` | CommonUtils | Builds `"<eventType> order=<orderId> <message>"` and writes it with `pub.flow:debugLog`, function `ORDER_AUDIT`, level `Info` | CAP-02 (`order.process:cancelOrder`), CAP-03 (`order.api.orders:_get`) |
+
+CAP-01 does not use it and has no logging at all (3.8, A3). Whether `Info` lines reach the log
+depends on the server's logging configuration `[TO CONFIRM]`.
+
+## 7. Data Dictionary
 
 ### `order.docs:OrderDoc`
 | Field | Type | Cardinality | Description |
@@ -252,6 +731,24 @@ logging at all, so failures leave no trace in the package itself.
 | `lines/sku` | string | 1 | Product SKU |
 | `lines/qty` | string | 1 | Quantity ordered |
 | `lines/price` | string | 1 | Unit price |
+
+### `order.docs:CancelDoc`
+| Field | Type | Cardinality | Description |
+|---|---|---|---|
+| `orderId` | string | 1 | Order to cancel |
+| `reason` | string | 0..1 | Free-text reason, written to the audit log |
+| `requestedBy` | string | 1 | User or system that asked for the cancellation. Never used |
+
+### Table `ORDERS` (columns inferred from the adapter SQL)
+| Column | Written by | Read by | Values seen in code |
+|---|---|---|---|
+| `ORDER_ID` | CAP-01 INSERT | CAP-02 WHERE, CAP-03 SELECT/WHERE | From `OrderDoc.orderId` |
+| `CUSTOMER_ID` | CAP-01 INSERT | CAP-03 SELECT (not returned) | From `OrderDoc.customerId` |
+| `AMOUNT` | CAP-01 INSERT | CAP-03 SELECT | From `OrderDoc.amount` (string) |
+| `STATUS` | CAP-01 INSERT, CAP-02 UPDATE | CAP-02 WHERE, CAP-03 SELECT | `PENDING`, `CANCELLED` |
+
+Column types, keys and constraints are not visible `[TO CONFIRM: DDL, especially a unique key on
+ORDER_ID]`.
 
 ```mermaid
 classDiagram
@@ -267,167 +764,265 @@ classDiagram
         +string qty
         +string price
     }
+    class CancelDoc {
+        +string orderId
+        +string reason
+        +string requestedBy
+    }
+    class ORDERS {
+        +ORDER_ID
+        +CUSTOMER_ID
+        +AMOUNT
+        +STATUS
+    }
     OrderDoc "1" --> "0..n" OrderLine : lines
+    OrderDoc ..> ORDERS : CAP-01 inserts
+    CancelDoc ..> ORDERS : CAP-02 updates by ORDER_ID
 ```
 
-## 7. Integration Catalog
+## 8. Integration Catalog
 | System | Protocol / adapter | Connection / endpoint alias | Operations | Used by |
 |---|---|---|---|---|
-| `ORDERS` table | JDBC adapter | `OrderDB_Conn` | INSERT (no UPDATE anywhere) | CAP-01 (`order.jdbc:insertOrder`) |
-| Payment gateway | HTTP | Hard-coded URL `https://payments.internal/charge`, no alias | Charge request (method not set in flow) | CAP-01 (`order.process:submitOrder`) |
+| `ORDERS` table | JDBC adapter | `OrderDB_Conn` | INSERT (CAP-01), UPDATE (CAP-02), SELECT (CAP-03) | `order.jdbc:insertOrder`, `order.jdbc:updateOrderStatus`, `order.jdbc:selectOrder` |
+| Payment gateway | HTTP | Hard-coded URL `https://payments.internal/charge`, no alias | Charge request (method not set in the flow) | CAP-01 |
+| `OrderDoc` publisher | Publish/subscribe | Broker/UM `[TO CONFIRM]` | Subscribe, filter `status == 'NEW'` | CAP-01 |
+| `CancelDoc` publisher | Publish/subscribe | Broker/UM `[TO CONFIRM]` | Subscribe | CAP-02 |
+| REST clients | HTTP | `/rest/order/api/orders` | GET | CAP-03 |
+| IS server log | `pub.flow:debugLog` | — | Write audit line | CAP-02, CAP-03 |
 
-## 8. Error Catalog
+## 9. Error Catalog
 | Message / code | Raised by | Where | Resulting behaviour |
 |---|---|---|---|
-| "orderId is required" | `ServiceException` | `order.process:validateOrder` | Caught by CAP-01 CATCH and replaced with the generic message below. Never logged |
-| "amount must be numeric" | `ServiceException` | `order.process:validateOrder` | Same as above |
-| "amount must be greater than zero" | `ServiceException` | `order.process:validateOrder` | Same as above |
-| "Order could not be validated or persisted" | Flow `EXIT … SIGNAL FAILURE` | `order.process:submitOrder` CATCH | Service fails. Not retried by the trigger (not an ISRuntimeException) |
-| Transport error from `pub.client:http` after 4 attempts | `pub.client:http` | `order.process:submitOrder` | Uncaught, so the service fails. Row kept or rolled back depending on transaction type `[TO CONFIRM]` |
-| HTTP 4xx/5xx from the gateway | Not raised | `order.process:submitOrder` | Silently treated as success |
+| "orderId is required" (ServiceException) | `order.process:validateOrder` | CAP-01 | Caught and replaced by the generic CAP-01 message. Never logged |
+| "amount must be numeric" | `order.process:validateOrder` | CAP-01 | Same as above |
+| "amount must be greater than zero" | `order.process:validateOrder` | CAP-01 | Same as above |
+| "Order could not be validated or persisted" | `EXIT FAILURE` | CAP-01 CATCH | Service fails. Not retried |
+| Transport error after 4 attempts | `pub.client:http` | CAP-01 | Uncaught. Row kept or rolled back per transaction type |
+| HTTP 4xx/5xx from the gateway | Not raised | CAP-01 | Treated as success |
+| "Order not found or not cancellable" | `EXIT FAILURE` | CAP-02 | Service fails after logging `CANCEL_REJECTED`. Not retried |
+| Database error on UPDATE | `order.jdbc:updateOrderStatus` | CAP-02 | Uncaught. Not logged. Not retried |
+| HTTP 400 "orderId is required" | `pub.flow:setResponseCode` + `error` | CAP-03 | Returned to the caller. Not logged |
+| HTTP 404 "Order not found" | `pub.flow:setResponseCode` + `error` | CAP-03 | Returned to the caller. Not logged |
+| Database error on SELECT | `order.jdbc:selectOrder` | CAP-03 | Uncaught. Error response (HTTP 500 assumed) `[TO CONFIRM]` |
 
-## 9. Configuration & Environment Dependencies
-- **Package dependency:** `WmPublic` (`manifest.v3`).
-- **JDBC connection:** alias `OrderDB_Conn`, used by `order.jdbc:insertOrder`. Its transaction
-  type decides whether the insert survives a later payment failure `[TO CONFIRM]`.
-- **Hard-coded HTTP endpoint:** `https://payments.internal/charge` in `order.process:submitOrder`.
-- **Trigger:** `order.triggers:orderTrigger`, serial, 3 retries 5 s apart (effective only for
-  ISRuntimeExceptions). "On retry failure" setting not supplied.
-- No startup/shutdown services, scheduler tasks or global variables were found in the package.
+The CAP-01 validation message "orderId is required" and the CAP-03 HTTP 400 message share the
+same text but come from different services.
+
+## 10. Configuration & Environment Dependencies
+- **Packages:** `OrderProcessing` requires `WmPublic` and `CommonUtils`. `CommonUtils` requires
+  `WmPublic`. See 3.2.
+- **JDBC connection:** `OrderDB_Conn`, shared by all three adapters. Its transaction type and pool
+  size are not supplied `[TO CONFIRM]`.
+- **Hard-coded HTTP endpoint:** `https://payments.internal/charge` (CAP-01).
+- **Triggers:** `orderTrigger` (serial, 3 retries configured, filter `status == 'NEW'`) and
+  `cancelTrigger` (concurrent with 4 threads, 0 retries). Neither retry setting is effective for
+  the errors these services raise.
+- **REST:** resource at `/rest/order/api/orders`. ACL not visible `[TO CONFIRM]`.
+- **Logging:** `pub.flow:debugLog` function `ORDER_AUDIT`, level `Info`.
+- No startup/shutdown services, scheduler tasks or global variables were found.
   `[TO CONFIRM: outside-package configuration.]`
 
-```mermaid
-flowchart LR
-    OrderProcessing["OrderProcessing package"] --> WmPublic["WmPublic"]
-```
+## 11. Non-Functional Characteristics Observed in Code
+- **Transactions:** no explicit `pub.art.transaction:*` boundaries anywhere. All three capabilities
+  depend on the transaction type of `OrderDB_Conn`.
+- **Retries:** only the CAP-01 payment call (up to 4 attempts in total, 5 s apart, transport
+  errors only). No effective trigger retries.
+- **Concurrency:** CAP-01 serial, CAP-02 concurrent (4), CAP-03 one per HTTP request. There is no
+  locking between capabilities apart from the `STATUS = 'PENDING'` condition on the cancel UPDATE.
+- **Idempotency:** CAP-01 has none (redelivery can insert and charge twice). CAP-02 is naturally
+  idempotent (a second cancel matches 0 rows, but then fails). CAP-03 is read-only.
+- **Timeouts:** none set for the HTTP call or the database `[TO CONFIRM: defaults]`.
+- **Logging/audit:** CAP-02 logs both outcomes. CAP-03 logs successes only. CAP-01 logs nothing.
+- **Security:** no authentication or ACL is visible for the REST resource or the triggers.
+- **Numeric handling:** amounts are strings, multiplied as floating-point numbers in CAP-01.
 
-## 10. Non-Functional Characteristics Observed in Code
-- **Transactions:** no explicit `pub.art.transaction:*` boundaries. The connection's transaction
-  type controls what happens (see 9).
-- **Retries:** payment call up to 4 attempts in total, 5 s apart, on transport errors only.
-  Trigger retries only happen for ISRuntimeExceptions, which this code never raises explicitly.
-- **Concurrency:** serial trigger, one document at a time.
-- **Timeouts:** none set for the HTTP call `[TO CONFIRM: IS default HTTP timeout in this
-  environment]`.
-- **Idempotency:** none. A redelivered document would be inserted and charged again unless
-  `ORDERS.ORDER_ID` is unique `[TO CONFIRM]`.
-- **Logging/audit:** none. Error details are dropped in CATCH.
-- **Numeric handling:** amounts and line values are strings, multiplied as floating-point numbers.
+## 12. Re-implementation Notes (target: Java)
 
-## 11. Re-implementation Notes (target: Java)
+**12.0 Target structure (proposal)** — All three capabilities share one table and one status
+lifecycle, so a single service that owns `ORDERS` is the simplest faithful port. Splitting it
+would turn today's shared-table coupling into distributed coordination.
 
-**11.1 Construct mapping**
+| Today (webMethods) | Proposed Java module / class | Notes |
+|---|---|---|
+| Package `OrderProcessing` | Spring Boot service `order-service` | Owns `ORDERS` |
+| CAP-01 `orderTrigger` + `submitOrder` + `validateOrder` | `OrderIntakeListener` → `OrderSubmissionService`, `OrderValidator` | Messaging adapter + service |
+| CAP-02 `cancelTrigger` + `cancelOrder` | `OrderCancellationListener` → `OrderCancellationService` | Messaging adapter + service |
+| CAP-03 `order.api.orders:_get` | `OrderQueryController` (`GET /rest/order/api/orders`) | Keep the path so callers don't change |
+| `order.jdbc:*` adapters | `OrderRepository` (JdbcTemplate) | One class for the three statements |
+| Package `CommonUtils` / `common.util:logEvent` | `AuditLogger` in a small shared library (or a class in the service) | SLF4J logger `ORDER_AUDIT` |
+| `order.docs:*` | `OrderDoc`, `OrderLine`, `CancelDoc` records + JSON/message mapping | Data contracts |
+
+**12.1 Construct mapping**
 | webMethods element | Behaviour to reproduce | Java equivalent |
 |---|---|---|
-| `order.triggers:orderTrigger` | Consume `OrderDoc` messages where `status == 'NEW'`, one at a time. Retry only errors classed as transient | JMS/Kafka listener with concurrency 1 and a selector/filter on `status`. Retry only exceptions marked as transient |
-| `order.process:submitOrder` | Steps in 4.1.5. Result discarded | `OrderSubmissionService.submit(OrderDoc)` returning `void` (or a result object if decision D2 says so) |
-| `order.process:validateOrder` | Three checks in 4.1.7, in order, first failure wins | `OrderValidator.validate(OrderDoc)` throwing `OrderValidationException` |
-| BRANCH `%amount% > 1000` / `$default` | Runs before validation. Anything that isn't over 1000 continues | `if (isOver(amount, 1000)) { … return; }`, with the string comparison behaviour from open question 7 |
-| LOOP + `pub.math:multiplyFloats` → `lineAmounts` | Per-line `qty × price` as `double`, unused | Drop it, or keep it as `double` math, per decision D5 |
-| `order.jdbc:insertOrder` | One INSERT with status `PENDING` | `JdbcTemplate.update("INSERT INTO ORDERS (ORDER_ID, CUSTOMER_ID, AMOUNT, STATUS) VALUES (?, ?, ?, ?)", …)` |
-| TRY / CATCH + `getLastError` + `EXIT FAILURE` | Validation or insert error → generic failure, original error dropped | `try { … } catch (Exception e) { throw new OrderProcessingException("Order could not be validated or persisted"); }`. Decision D6 covers whether to keep the cause |
-| `pub.client:http` | Send `orderId`, `amount`, ignore the response status | `HttpClient` / `RestClient`. Don't fail on non-2xx unless decision D3 says so |
-| REPEAT `COUNT=3 BACK-OFF=5 LOOP-ON=FAILURE` | Up to 4 attempts in total, 5 s apart, on transport exceptions only | Resilience4j `Retry` (`maxAttempts=4`, `waitDuration=5s`, `retryExceptions=IOException`) or Spring `@Retryable` |
-| Implicit adapter transaction | Depends on the `OrderDB_Conn` transaction type | NO_TRANSACTION → auto-commit insert. LOCAL/XA → `@Transactional` around the whole `submit` |
+| `orderTrigger` (serial, filter `status == 'NEW'`) | One document at a time, only `NEW`. Ordinary failures not retried | JMS/Kafka listener, concurrency 1, selector/filter on `status`. Retry only exceptions marked as transient |
+| `cancelTrigger` (concurrent, 4) | Up to 4 in parallel, no retries | Listener with concurrency 4, no retry |
+| REST resource `_get` | `GET /rest/order/api/orders?orderId=`, outputs as body | `@GetMapping("/rest/order/api/orders")` with `@RequestParam(required = false) String orderId` |
+| `pub.flow:setResponseCode` | 400 / 404 with `{ "error": … }`, otherwise 200 with `{ "order": … }` | `ResponseEntity.status(…).body(…)` |
+| `submitOrder` | Steps in 5.1.5. Result discarded | `OrderSubmissionService.submit(OrderDoc)` returning `void` (or a result per D2) |
+| `cancelOrder` | Steps in 5.2.5 | `OrderCancellationService.cancel(CancelDoc)` |
+| `validateOrder` | Three checks in 5.1.7, first failure wins | `OrderValidator.validate(OrderDoc)` throwing `OrderValidationException` |
+| BRANCH `%amount% > 1000` / `$default` | Runs before validation. Anything not over 1000 continues | `if (isOver(amount, 1000)) { … return; }`, string comparison per Q7 |
+| BRANCH `$null` (CAP-03) | Only a *missing* parameter → 400. Empty → continue | `if (orderId == null)` (not `isBlank`) to match today |
+| BRANCH on row count `"0"` | Zero vs any other count | `if (count == 0)` |
+| LOOP + `pub.math:multiplyFloats` | Per-line `qty × price` as `double`, unused | Drop it, or keep it, per D5 |
+| `pub.list:sizeOfList` | Row count | `results.size()` |
+| `order.jdbc:insertOrder` / `updateOrderStatus` / `selectOrder` | SQL in 5.1.9 / 5.2.9 / 5.3.9 | `OrderRepository.insert / updateStatus(id, expected, new) → int / findById → List` |
+| TRY/CATCH + `getLastError` + `EXIT FAILURE` (CAP-01) | Validation or insert error → generic failure, cause dropped | `catch (Exception e) { throw new OrderProcessingException("Order could not be validated or persisted"); }`. D6 covers keeping the cause |
+| `EXIT FAILURE` (CAP-02) | Fail with "Order not found or not cancellable" | `throw new OrderNotCancellableException(…)`, not retried |
+| `pub.client:http` + REPEAT `COUNT=3` | Up to 4 attempts, 5 s apart, transport exceptions only. Ignore HTTP status | `RestClient` + Resilience4j `Retry` (`maxAttempts=4`, `waitDuration=5s`, `retryExceptions=IOException`). Don't fail on non-2xx unless D3 says so |
+| `common.util:logEvent` / `pub.flow:debugLog` | `"<eventType> order=<id> <message>"` at Info | `auditLog.info("{} order={} {}", eventType, orderId, message)` |
+| Implicit adapter transaction | Depends on `OrderDB_Conn` | NO_TRANSACTION → auto-commit. LOCAL/XA → `@Transactional` per service method |
 | `%orderId%-CONF` | Text concatenation | `orderId + "-CONF"` |
 
-**11.2 Behaviour decisions (reproduce exactly or fix)**
+**12.2 Behaviour decisions (reproduce exactly or fix)**
 | # | Current behaviour | Evidence | Options | Decision owner |
 |---|---|---|---|---|
-| D1 | `ORDERS.STATUS` stays `PENDING` forever | No UPDATE after insert (4.1.12) | Reproduce, or add an UPDATE to `CONFIRMED` / `FAILED` | Business owner |
-| D2 | Status and confirmation number go nowhere | Outputs discarded by trigger (4.1.3) | Reproduce, or publish a result event / store the confirmation number | Business owner |
-| D3 | Declined or failed charges (HTTP 4xx/5xx) count as success | `header/status` never read (4.1.10) | Reproduce, or treat non-2xx as failure (and decide whether to retry) | Business + payments |
-| D4 | Orders over 1000 are dropped, not queued for approval | R1 ends with nothing stored (4.1.6) | Reproduce, or store/publish them for approval | Business owner |
-| D5 | Line totals calculated and ignored | `lineAmounts` unused (4.1.5) | Drop it, or add a check that lines add up to `amount` | Business analyst |
-| D6 | Validation and database error details are lost | `lastError` unused (4.1.10) | Reproduce the generic message, or log and keep the cause | Tech lead |
-| D7 | Money handled as floating point | `multiplyFloats`, `Double.parseDouble` | Use `double` to match exactly, or switch to `BigDecimal` | Tech lead + finance |
-| D8 | Duplicate delivery may insert and charge twice | No idempotency (10) | Reproduce, or de-duplicate on `orderId` | Tech lead |
+| D1 | `ORDERS.STATUS` stays `PENDING` after CAP-01, whatever the payment result | 5.1.12, 3.6 | Reproduce, or UPDATE to `CONFIRMED` / `FAILED` | Business owner |
+| D2 | CAP-01 status and confirmation number go nowhere | 5.1.3 | Reproduce, or publish a result event / store the confirmation number | Business owner |
+| D3 | Declined or failed charges (HTTP 4xx/5xx) count as success | 5.1.10 | Reproduce, or treat non-2xx as failure | Business + payments |
+| D4 | Orders over 1000 are dropped, not queued for approval | 5.1.6 | Reproduce, or store/publish them for approval | Business owner |
+| D5 | Line totals calculated and ignored | 5.1.5 | Drop it, or check that the lines add up to `amount` | Business analyst |
+| D6 | CAP-01 error details are lost | 5.1.10 | Reproduce the generic message, or log and keep the cause | Tech lead |
+| D7 | Money handled as floating point | `multiplyFloats`, `Double.parseDouble` | `double` to match, or `BigDecimal` | Tech lead + finance |
+| D8 | Duplicate `OrderDoc` delivery may insert and charge twice | 11 | Reproduce, or de-duplicate on `orderId` | Tech lead |
+| D9 | Charged orders can be cancelled with no refund | 3.6, finding 1 | Reproduce, block cancel after charge, or trigger a refund | Business + payments |
+| D10 | A cancel processed before its order exists is lost. A cancel during payment still charges | 3.6, findings 4–5 | Reproduce, park and retry early cancels, or lock/check status before charging | Tech lead + business |
+| D11 | REST lookup has no visible security | 3.8, A7 | Reproduce (if secured outside the package), or add authentication | Security |
+| D12 | Logging and error handling differ per capability | 3.7 | Reproduce per capability, or apply one audit/error policy | Tech lead |
+| D13 | Multiple rows for one `ORDER_ID` give an unclear lookup result | 3.6, finding 6 | Reproduce (first row?), or enforce a unique key | DBA + tech lead |
 
-**11.3 Data types**
+**12.3 Data types**
 | Field | IS type | Meaning | Recommended Java type | Note |
 |---|---|---|---|---|
-| `orderId` | String | Identifier | `String` | Must be non-blank |
-| `customerId` | String | Identifier | `String` | Not validated today |
-| `amount` | String | USD total | `BigDecimal` (or `double` to match, D7) | Parsed with `Double.parseDouble` today, so "1e3" and "NaN" parse |
-| `lines/qty` | String | Quantity | `int` / `BigDecimal` | Multiplied as float today |
-| `lines/price` | String | Unit price | `BigDecimal` | Multiplied as float today |
-| `status` | String | Order state | `enum OrderStatus { PENDING, PENDING_APPROVAL, FAILED, CONFIRMED }` | Only `PENDING` is ever stored |
+| `orderId` | String | Identifier | `String` | Non-blank in CAP-01. Unchecked in CAP-02/03 |
+| `customerId` | String | Identifier | `String` | Not validated |
+| `amount` / `AMOUNT` | String | USD total | `BigDecimal` (or `double` to match, D7) | `Double.parseDouble` accepts "1e3" and "NaN" today |
+| `lines/qty`, `lines/price` | String | Quantity, unit price | `int`/`BigDecimal`, `BigDecimal` | Multiplied as float today |
+| `status` / `STATUS` | String | Order state | `enum OrderStatus { PENDING, PENDING_APPROVAL, FAILED, CONFIRMED, CANCELLED }` | Only `PENDING` and `CANCELLED` are ever stored |
+| `updateCount`, `resultCount` | String | Row counts | `int` | Compared with the string `"0"` today |
+| `reason`, `requestedBy` | String | Free text, actor | `String` | `requestedBy` unused today |
 
-**11.4 Idempotency & transactions** — The flow inserts first and charges second, with no
-de-duplication. On redelivery of the same `OrderDoc` (e.g. after a crash), the order is inserted
-again (or fails if `ORDER_ID` is unique) and may be charged again. If all payment attempts fail
-to connect, the outcome depends on the `OrderDB_Conn` transaction type: with NO_TRANSACTION a
-`PENDING` row remains with no charge, with LOCAL/XA the insert is rolled back. Confirm both
-before choosing transaction boundaries in Java.
+**12.4 Idempotency, transactions and concurrency** — CAP-01 inserts first and charges second,
+with no de-duplication: redelivery can insert twice and charge twice (D8). If every payment
+attempt fails to connect, whether the `PENDING` row survives depends on the `OrderDB_Conn`
+transaction type. CAP-02's conditional UPDATE is safe to repeat, but a repeat counts as a failure.
+The two listeners must keep today's independence (or fix it on purpose, D10): CAP-02 at
+concurrency 4 can overtake CAP-01. CAP-03 is read-only.
 
-**11.5 Acceptance test cases** (describe current behaviour; update them if a decision in 11.2 changes it)
+**12.5 Acceptance test cases** (describe current behaviour; update them if a decision in 12.2 changes it)
 | ID | Input / precondition | Expected observable outcome | Covers |
 |---|---|---|---|
-| T01 | `amount = "1500"`, valid order | No INSERT, no HTTP call, service succeeds | R1 |
-| T02 | `amount = "1000"`, valid order, gateway returns 200 | 1 INSERT with STATUS `PENDING`, 1 HTTP call, success | R2 boundary |
-| T03 | `amount = "250"`, 2 lines, gateway returns 200 | 1 INSERT `PENDING`, 1 HTTP call with `orderId` and `amount = "250"`, success, no UPDATE | R2, 4.1.5 |
-| T04 | `orderId = ""` | No INSERT, no HTTP call, failure "Order could not be validated or persisted" | Validation 1 |
-| T05 | `amount = "abc"` | Branch result `[TO CONFIRM]`, then validation failure as T04, no INSERT | R2, validation 2 |
-| T06 | `amount = "0"` and `amount = "-5"` | Validation failure as T04 | Validation 3 |
-| T07 | INSERT throws an SQL error | No HTTP call, failure as T04 | Insert-fails row |
-| T08 | Gateway refuses connections every time | 4 HTTP attempts about 5 s apart, then the service fails. Row present or absent per transaction type | Retry, gateway-unreachable row |
-| T09 | Gateway refuses twice, then returns 200 | 3 HTTP attempts, success, 1 row `PENDING` | Retry |
-| T10 | Gateway returns 402 or 500 | 1 HTTP attempt, success, row `PENDING` | HTTP-error row, D3 |
-| T11 | Same `OrderDoc` delivered twice | 2 INSERT attempts and up to 2 charges `[TO CONFIRM: unique key]` | D8 |
-| T12 | Document with `status = "PAID"` | Trigger filter skips it, no service run | 4.1.2 |
-| T13 | Valid order with empty `lines` | Saved and charged as normal | Missing validation |
+| T01 | `OrderDoc` `amount = "1500"`, valid | No INSERT, no HTTP call, service succeeds | CAP-01-R1 |
+| T02 | `amount = "1000"`, gateway 200 | 1 INSERT `PENDING`, 1 HTTP call, success | CAP-01-R2 boundary |
+| T03 | `amount = "250"`, 2 lines, gateway 200 | 1 INSERT `PENDING`, 1 HTTP call with `orderId` and `amount = "250"`, no UPDATE | CAP-01 5.1.5 |
+| T04 | `orderId = ""` | No INSERT, no HTTP, failure "Order could not be validated or persisted" | CAP-01 validation |
+| T05 | `amount = "abc"` | Branch result `[TO CONFIRM]`, then validation failure as T04 | CAP-01-R2, validation |
+| T06 | `amount = "0"` and `"-5"` | Validation failure as T04 | CAP-01 validation |
+| T07 | INSERT throws | No HTTP, failure as T04 | CAP-01 errors |
+| T08 | Gateway refuses connections every time | 4 attempts about 5 s apart, service fails. Row per transaction type | CAP-01 retry |
+| T09 | Gateway refuses twice, then 200 | 3 attempts, success, row `PENDING` | CAP-01 retry |
+| T10 | Gateway returns 402 or 500 | 1 attempt, success, row `PENDING` | CAP-01, D3 |
+| T11 | Same `OrderDoc` delivered twice | 2 INSERT attempts, up to 2 charges `[TO CONFIRM: unique key]` | D8 |
+| T12 | `OrderDoc` with `status = "PAID"` | Trigger skips it | CAP-01 trigger |
+| T13 | Valid order with empty `lines` | Saved and charged as normal | CAP-01 validation gap |
+| T14 | `CancelDoc` for a `PENDING` order | Row → `CANCELLED`, log `ORDER_CANCELLED order=<id> <reason>`, success | CAP-02-R2 |
+| T15 | `CancelDoc` for an unknown id | No change, log `CANCEL_REJECTED`, failure "Order not found or not cancellable", not retried | CAP-02-R1 |
+| T16 | `CancelDoc` for an already `CANCELLED` order | As T15 | CAP-02-R1 |
+| T17 | `CancelDoc` without `orderId` | As T15 `[TO CONFIRM: adapter null handling]` | CAP-02 validation |
+| T18 | Database error on the cancel UPDATE | Failure, nothing logged, not retried | CAP-02 errors |
+| T19 | Submit (T03) completes, then `CancelDoc` | Row `CANCELLED`, customer stays charged, no gateway call | D9, cross-capability |
+| T20 | `CancelDoc` processed before the matching `OrderDoc` | Cancel fails (T15), then order inserted `PENDING` and charged | D10, cross-capability |
+| T21 | `CancelDoc` processed between CAP-01's INSERT and charge | Row `CANCELLED`, charge still sent | D10, cross-capability |
+| T22 | `GET /rest/order/api/orders` (no parameter) | 400, `{error: "orderId is required"}`, no DB read, no log | CAP-03-R1 |
+| T23 | `GET …?orderId=` (empty) | 404, `{error: "Order not found"}`, no log | CAP-03-R2, R3 |
+| T24 | `GET …?orderId=<unknown>` | 404, no log | CAP-03-R3 |
+| T25 | `GET …?orderId=<existing>` | 200, `{order: {orderId, status, amount}}`, log `ORDER_QUERY order=<id>` | CAP-03-R4 |
+| T26 | `GET` for an order submitted and paid (T03) | 200 with `status = "PENDING"` | D1, cross-capability |
+| T27 | `GET` for an order over 1000 (T01) | 404 | D4, cross-capability |
+| T28 | Database down on `GET` | Error response, HTTP 500 assumed `[TO CONFIRM]`, no log | CAP-03 errors |
 
-## 12. Open Questions
+## 13. Open Questions
 | # | Question | Context / service | Owner |
 |---|---|---|---|
-| 1 | What HTTP method, headers, auth and timeout should the payment call use? None are set in the flow | `order.process:submitOrder` | Integration team |
-| 2 | What is the transaction type of `OrderDB_Conn`? It decides whether the insert is rolled back when payment can't be reached | `order.jdbc:insertOrder` | DBA / IS admin |
-| 3 | Should `ORDERS.STATUS` be updated to `CONFIRMED` / `FAILED`? It stays `PENDING` today (D1) | `order.process:submitOrder` | Business owner |
-| 4 | Where are orders over 1000 approved? They are neither stored nor published (D4) | `order.process:submitOrder` | Business owner |
-| 5 | Should the status or confirmation number reach the storefront or customer? Outputs are discarded (D2) | `order.process:submitOrder` | Business owner |
-| 6 | Is treating HTTP 4xx/5xx (e.g. declined payment) as success intended? (D3) | `order.process:submitOrder` | Payments |
-| 7 | How does IS evaluate `%amount% > 1000` for strings such as "1000.50", "1,200" or "abc"? | `order.process:submitOrder` | IS developer |
-| 8 | What is the trigger's "on retry failure" setting, and does the JDBC adapter report transient errors as retryable? | `order.triggers:orderTrigger` | IS admin |
-| 9 | Is `ORDERS.ORDER_ID` unique? Is duplicate delivery possible? (D8) | `order.jdbc:insertOrder` | DBA |
-| 10 | Should the gateway URL become an endpoint alias? | `order.process:submitOrder` | Integration team |
-| 11 | Are there scheduler tasks, global variables or UM/Broker settings outside the package that affect this flow? | Package-wide | IS admin |
+| Q1 | What HTTP method, headers, auth and timeout should the payment call use? None are set in the flow | `order.process:submitOrder` | Integration team |
+| Q2 | What are the transaction type and pool size of `OrderDB_Conn`? They decide rollback behaviour for all three capabilities | `order.jdbc:*` | DBA / IS admin |
+| Q3 | Should `ORDERS.STATUS` be updated to `CONFIRMED` / `FAILED`? (D1) | `order.process:submitOrder` | Business owner |
+| Q4 | Where are orders over 1000 approved? They are neither stored nor published (D4) | `order.process:submitOrder` | Business owner |
+| Q5 | Should the CAP-01 status or confirmation number reach anyone? (D2) | `order.process:submitOrder` | Business owner |
+| Q6 | Is treating HTTP 4xx/5xx (e.g. declined payment) as success intended? (D3) | `order.process:submitOrder` | Payments |
+| Q7 | How does IS evaluate `%amount% > 1000` for strings such as "1000.50", "1,200" or "abc"? | `order.process:submitOrder` | IS developer |
+| Q8 | What are the real trigger settings (concurrency, retries, "on retry failure")? Does the JDBC adapter report transient errors as retryable? | `order.triggers:*` | IS admin |
+| Q9 | Is `ORDERS.ORDER_ID` unique? (D8, D13) | `ORDERS` | DBA |
+| Q10 | Should the gateway URL become an endpoint alias? | `order.process:submitOrder` | Integration team |
+| Q11 | Are there scheduler tasks, global variables or UM/Broker settings outside the packages? | Application-wide | IS admin |
+| Q12 | What ACL / authentication protects `/rest/order/api/orders`? (D11) | `order.api.orders:_get` | Security |
+| Q13 | What does the REST resource return on a database error (status, body, exception text)? Which content types are supported? | `order.api.orders:_get` | IS developer |
+| Q14 | Should cancelling a charged order trigger a refund, or be blocked? (D9) | `order.process:cancelOrder` | Business + payments |
+| Q15 | Can a `CancelDoc` arrive before its `OrderDoc` is processed? How should early cancels be handled? (D10) | Both triggers | Business + integration |
+| Q16 | Which row does CAP-03 return when several match? (D13) | `order.api.orders:_get` | IS developer |
+| Q17 | When `reason` is missing, does `%message%` become empty or stay literal in the audit line? | `common.util:logEvent` | IS developer |
+| Q18 | Is the server log configured so that `ORDER_AUDIT` Info lines are kept? | `common.util:logEvent` | IS admin |
+| Q19 | Should `requestedBy` be recorded for cancellations? (A8) | `order.process:cancelOrder` | Business owner |
+| Q20 | Which systems actually publish `OrderDoc` and `CancelDoc`? | Triggers | Integration team |
 
 ## Appendix A — Service Inventory
-| Name | Kind | Capability | Purpose |
-|---|---|---|---|
-| `order.process:submitOrder` | Flow service | CAP-01 | Validates, saves and charges an order |
-| `order.process:validateOrder` | Java service | CAP-01 | Checks `orderId` is present and `amount` is a positive number |
-| `order.jdbc:insertOrder` | JDBC adapter service | CAP-01 | Inserts the order into `ORDERS` |
-| `order.triggers:orderTrigger` | Trigger | CAP-01 | Subscribes to `OrderDoc` (`status == 'NEW'`) and invokes `submitOrder` |
-| `order.docs:OrderDoc` | Document type | Data dictionary | Canonical order document |
+| Name | Package | Kind | Capability | Purpose |
+|---|---|---|---|---|
+| `order.process:submitOrder` | OrderProcessing | Flow service | CAP-01 | Validates, saves and charges an order |
+| `order.process:validateOrder` | OrderProcessing | Java service | CAP-01 | Checks `orderId` is present and `amount` is a positive number |
+| `order.jdbc:insertOrder` | OrderProcessing | JDBC adapter service | CAP-01 | Inserts the order into `ORDERS` |
+| `order.triggers:orderTrigger` | OrderProcessing | Trigger | CAP-01 | Subscribes to `OrderDoc` (`status == 'NEW'`), invokes `submitOrder` |
+| `order.process:cancelOrder` | OrderProcessing | Flow service | CAP-02 | Cancels a `PENDING` order and logs the outcome |
+| `order.jdbc:updateOrderStatus` | OrderProcessing | JDBC adapter service | CAP-02 | Conditional status UPDATE on `ORDERS` |
+| `order.triggers:cancelTrigger` | OrderProcessing | Trigger | CAP-02 | Subscribes to `CancelDoc`, invokes `cancelOrder` |
+| `order.api.orders:_get` | OrderProcessing | Flow service (REST resource) | CAP-03 | `GET /rest/order/api/orders` status lookup |
+| `order.jdbc:selectOrder` | OrderProcessing | JDBC adapter service | CAP-03 | Reads one order by id |
+| `common.util:logEvent` | CommonUtils | Flow service | CAP-02, CAP-03 | Audit line to the server log |
+| `order.docs:OrderDoc` | OrderProcessing | Document type | CAP-01 | New order contract |
+| `order.docs:CancelDoc` | OrderProcessing | Document type | CAP-02 | Cancellation request contract |
 
 ## Appendix B — Coverage Report
 
-**Services** — all 5 nodes in `inventory.json` appear in Section 4 and Appendix A. No gaps.
+**Services** — all 12 nodes in `inventory.json` appear in Sections 3 and 5 and in Appendix A. No gaps.
 
-**Branches, exits, catches and retries in `order.process:submitOrder`**
-| Construct | Addressed in |
-|---|---|
-| BRANCH case `%amount% > 1000` | R1 (4.1.6), 4.1.5 step 2 |
-| BRANCH `$default` | R2 (4.1.6) |
-| `EXIT $flow SUCCESS` after approval | 4.1.5 step 2, flowchart node E |
-| TRY around validate + LOOP + insert | 4.1.10 rows 1–2 |
-| CATCH + `EXIT $flow FAILURE` | 4.1.10 rows 1–2, flowchart node H |
-| LOOP over `order/lines` → `lineAmounts` | 4.1.5 step 3.2, 4.1.8 |
-| REPEAT (COUNT 3, back-off 5 s) around `pub.client:http` | 4.1.10 rows 3–4, 11.1, T08–T10 |
-| Final `EXIT $flow SUCCESS` | 4.1.5 step 5, flowchart node M |
+**Branches, exits, catches and retries**
+| Service | Construct | Addressed in |
+|---|---|---|
+| `submitOrder` | BRANCH `%amount% > 1000` / `$default` | CAP-01-R1 / R2 (5.1.6) |
+| `submitOrder` | `EXIT $flow SUCCESS` after approval | 5.1.5 step 2 |
+| `submitOrder` | TRY + CATCH + `EXIT $flow FAILURE` | 5.1.10 rows 1–2 |
+| `submitOrder` | LOOP `order/lines` → `lineAmounts` | 5.1.5 step 3.2 |
+| `submitOrder` | REPEAT (COUNT 3, back-off 5 s) | 5.1.10 rows 3–4, 12.1 |
+| `submitOrder` | Final `EXIT $flow SUCCESS` | 5.1.5 step 5 |
+| `cancelOrder` | BRANCH on `rowsUpdated`: CASE `0` / `$default` | CAP-02-R1 / R2 (5.2.6) |
+| `cancelOrder` | `EXIT $flow FAILURE` "Order not found or not cancellable" | 5.2.10 row 1 |
+| `_get` | BRANCH on `orderId`: `$null` / `$default` | CAP-03-R1 / R2 (5.3.6) |
+| `_get` | BRANCH on `resultCount`: CASE `0` / `$default` | CAP-03-R3 / R4 (5.3.6) |
+| `_get` | `EXIT $flow SUCCESS` after 400 and after 404 | 5.3.5 steps 1 and 4 |
+| `logEvent` | MAP + `pub.flow:debugLog` | Section 6 |
 
 **Semantic flags from the extract**
 | Flag | Addressed in |
 |---|---|
-| `submitOrder`: `$default` also catches missing / non-numeric values | R2, open question 7, T05 |
-| `submitOrder`: `lineAmounts` never used | 4.1.5 step 3.2, 4.1.12, D5 |
-| `submitOrder`: `lastError` never logged or rethrown | 4.1.10, 4.1.12, D6 |
-| `submitOrder`: `pub.client:http` status never checked | 4.1.10 row 4, 4.1.12, D3, T10 |
-| `submitOrder`: `status` changed after insert, never re-saved | 4.1.5 step 5, 4.1.12, D1 |
-| `submitOrder`: floating-point money | 4.1.12, 11.3, D7 |
-| `submitOrder`: outputs discarded (trigger-invoked) | 4.1.3, 4.1.12, D2 |
-| `validateOrder`: floating-point money | 4.1.7, 11.3, D7 |
-| `orderTrigger`: trigger retries never happen | 4.1.2, Section 8, open question 8 |
+| `submitOrder`: `$default` also catches missing / non-numeric values | CAP-01-R2, Q7, T05 |
+| `submitOrder`: `lineAmounts` never used | 5.1.5, 5.1.12, D5 |
+| `submitOrder`: `lastError` never logged or rethrown | 5.1.10, 5.1.12, D6 |
+| `submitOrder`: `pub.client:http` status never checked | 5.1.10, D3, T10 |
+| `submitOrder`: `status` changed after insert, never re-saved | 5.1.12, 3.6, D1 |
+| `submitOrder`: floating-point money | 5.1.12, 12.3, D7 |
+| `submitOrder`: outputs discarded (trigger-invoked) | 5.1.3, D2 |
+| `validateOrder`: floating-point money | 5.1.7, 12.3, D7 |
+| `orderTrigger`: trigger retries never happen | 5.1.2, Q8 |
+| `cancelTrigger`: trigger retries never happen | 5.2.2, Q8 |
 
-**Needs SME review** — the 11 open questions in Section 12 and the 8 decisions in 11.2.
+**Architecture observations from the extract**
+| Observation | Addressed in |
+|---|---|
+| `ORDERS` shared by 3 capabilities | 3.6 (lifecycle + 7 combined findings), A1, D1, D9, D10, D13 |
+| Logging inconsistent | 3.7, A3, D12 |
+| Error handling inconsistent | 3.7, A4, D12 |
+| Hard-coded payment URL | A5, Q10 |
+| All adapters share `OrderDB_Conn` | A6, Q2 |
+
+**Needs SME review** — the 20 open questions in Section 13 and the 13 decisions in 12.2.

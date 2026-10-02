@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FLOW>
+  <INVOKE SERVICE="order.jdbc:updateOrderStatus">
+    <COMMENT>Only orders still in PENDING can be cancelled.</COMMENT>
+    <MAP MODE="INPUT">
+      <MAPCOPY FROM="cancel/orderId" TO="orderId"/>
+      <MAPSET FIELD="newStatus"><DATA><Values><value>CANCELLED</value></Values></DATA></MAPSET>
+      <MAPSET FIELD="expectedStatus"><DATA><Values><value>PENDING</value></Values></DATA></MAPSET>
+    </MAP>
+    <MAP MODE="OUTPUT">
+      <MAPCOPY FROM="updateCount" TO="rowsUpdated"/>
+    </MAP>
+  </INVOKE>
+
+  <BRANCH SWITCH="rowsUpdated">
+    <SEQUENCE NAME="0">
+      <INVOKE SERVICE="common.util:logEvent">
+        <MAP MODE="INPUT">
+          <MAPSET FIELD="eventType"><DATA><Values><value>CANCEL_REJECTED</value></Values></DATA></MAPSET>
+          <MAPCOPY FROM="cancel/orderId" TO="orderId"/>
+          <MAPSET FIELD="message"><DATA><Values><value>not found or not PENDING</value></Values></DATA></MAPSET>
+        </MAP>
+      </INVOKE>
+      <EXIT FROM="$flow" SIGNAL="FAILURE" FAILURE-MESSAGE="Order not found or not cancellable"/>
+    </SEQUENCE>
+    <SEQUENCE NAME="$default">
+      <INVOKE SERVICE="common.util:logEvent">
+        <MAP MODE="INPUT">
+          <MAPSET FIELD="eventType"><DATA><Values><value>ORDER_CANCELLED</value></Values></DATA></MAPSET>
+          <MAPCOPY FROM="cancel/orderId" TO="orderId"/>
+          <MAPCOPY FROM="cancel/reason" TO="message"/>
+        </MAP>
+      </INVOKE>
+    </SEQUENCE>
+  </BRANCH>
+</FLOW>

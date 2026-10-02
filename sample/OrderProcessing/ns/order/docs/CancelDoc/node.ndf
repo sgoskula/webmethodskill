@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Values>
+  <value name="node_type">recordDef</value>
+  <value name="node_comment">Request to cancel an existing order, published by customer service.</value>
+  <array name="rec_fields">
+    <record>
+      <value name="field_name">orderId</value>
+      <value name="field_type">string</value>
+      <value name="field_dim">0</value>
+    </record>
+    <record>
+      <value name="field_name">reason</value>
+      <value name="field_type">string</value>
+      <value name="field_dim">0</value>
+      <value name="field_opt">true</value>
+    </record>
+    <record>
+      <value name="field_name">requestedBy</value>
+      <value name="field_type">string</value>
+      <value name="field_dim">0</value>
+      <value name="node_comment">User or system that asked for the cancellation.</value>
+    </record>
+  </array>
+</Values>

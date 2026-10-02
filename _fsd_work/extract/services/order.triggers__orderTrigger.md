@@ -2,7 +2,9 @@
 
 - **Kind:** Trigger
 - **Package:** OrderProcessing
+- **Role:** Trigger (subscription)
 - **Source dir:** `sample/OrderProcessing/ns/order/triggers/orderTrigger`
+- **Used by capabilities:** order.process:submitOrder
 - **Developer comment:** Subscribes to new OrderDoc publications from the storefront and invokes order submission.
 
 ## Raw properties (secrets redacted)

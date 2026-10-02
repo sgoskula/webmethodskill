@@ -3,7 +3,6 @@
   <value name="version">1.0</value>
   <record name="requires">
     <value name="WmPublic">true</value>
-    <value name="CommonUtils">true</value>
   </record>
   <record name="startup_services">
   </record>

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FLOW>
+  <MAP>
+    <COMMENT>Build one audit line: EVENT order=ID message.</COMMENT>
+    <MAPSET FIELD="logLine" VARIABLES="true"><DATA><Values><value>%eventType% order=%orderId% %message%</value></Values></DATA></MAPSET>
+  </MAP>
+  <INVOKE SERVICE="pub.flow:debugLog">
+    <MAP MODE="INPUT">
+      <MAPCOPY FROM="logLine" TO="message"/>
+      <MAPSET FIELD="function"><DATA><Values><value>ORDER_AUDIT</value></Values></DATA></MAPSET>
+      <MAPSET FIELD="level"><DATA><Values><value>Info</value></Values></DATA></MAPSET>
+    </MAP>
+  </INVOKE>
+</FLOW>

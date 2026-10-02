@@ -41,8 +41,16 @@ def lint_block(src):
                     errs.append(f"line {no}: unexpected '{ch}' outside quotes")
                     stack = []
                     break
+        word = line.split()[0]
+        if kind in ("flowchart", "graph"):
+            if word == "subgraph":
+                depth += 1
+            elif word == "end":
+                depth -= 1
+                if depth < 0:
+                    errs.append(f"line {no}: 'end' without an open subgraph")
+                    depth = 0
         if kind == "sequenceDiagram":
-            word = line.split()[0]
             if word in SEQ_OPENERS:
                 depth += 1
             elif word == "end":
@@ -54,7 +62,7 @@ def lint_block(src):
                 errs.append(f"line {no}: ';' splits statements in sequence diagrams; remove it")
     errs += [f"line {no}: '{want}' never closed" for want, no in stack]
     if depth:
-        errs.append(f"{depth} alt/loop/opt block(s) missing 'end'")
+        errs.append(f"{depth} block(s) (alt/loop/opt/subgraph) missing 'end'")
     return kind, errs
 
 

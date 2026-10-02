@@ -2,7 +2,9 @@
 
 - **Kind:** jdbc service
 - **Package:** OrderProcessing
+- **Role:** Data access (adapter)
 - **Source dir:** `sample/OrderProcessing/ns/order/jdbc/insertOrder`
+- **Used by capabilities:** order.process:submitOrder
 - **Developer comment:** JDBC adapter service that inserts a new order row into the ORDERS table.
 - **Invoked by:** order.process:submitOrder
 

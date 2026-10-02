@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Values>
+  <value name="node_type">adapterService</value>
+  <value name="svc_type">jdbc</value>
+  <value name="node_comment">JDBC adapter service that changes the status of an order when it has the expected current status.</value>
+  <value name="connectionName">OrderDB_Conn</value>
+  <value name="operationType">UPDATE</value>
+  <value name="tableName">ORDERS</value>
+  <value name="sqlStatement">UPDATE ORDERS SET STATUS = ? WHERE ORDER_ID = ? AND STATUS = ?</value>
+  <record name="svc_sig">
+    <record name="sig_in">
+      <array name="rec_fields">
+        <record>
+          <value name="field_name">newStatus</value>
+          <value name="field_type">string</value>
+          <value name="field_dim">0</value>
+        </record>
+        <record>
+          <value name="field_name">orderId</value>
+          <value name="field_type">string</value>
+          <value name="field_dim">0</value>
+        </record>
+        <record>
+          <value name="field_name">expectedStatus</value>
+          <value name="field_type">string</value>
+          <value name="field_dim">0</value>
+        </record>
+      </array>
+    </record>
+    <record name="sig_out">
+      <array name="rec_fields">
+        <record>
+          <value name="field_name">updateCount</value>
+          <value name="field_type">string</value>
+          <value name="field_dim">0</value>
+        </record>
+      </array>
+    </record>
+  </record>
+</Values>

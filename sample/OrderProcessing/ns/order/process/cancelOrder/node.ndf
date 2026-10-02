@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Values>
+  <value name="node_type">service</value>
+  <value name="svc_type">flow</value>
+  <value name="node_comment">Cancels a PENDING order and writes an audit log entry.</value>
+  <record name="svc_sig">
+    <record name="sig_in">
+      <array name="rec_fields">
+        <record>
+          <value name="field_name">cancel</value>
+          <value name="field_type">record</value>
+          <value name="field_dim">0</value>
+          <value name="rec_ref">order.docs:CancelDoc</value>
+        </record>
+      </array>
+    </record>
+    <record name="sig_out">
+      <array name="rec_fields">
+      </array>
+    </record>
+  </record>
+</Values>

@@ -32,6 +32,13 @@ reference, `field_opt`, `nillable`).
   join type; plus concurrency (serial/concurrent, thread count) and retry/error settings.
 - **REST resources / REST API descriptors, Web service descriptors**: map HTTP verbs + paths or
   SOAP operations to services; capture auth/ACL if present.
+- **Legacy REST resources (REST v1)**: a folder holding flow services named `_get`, `_post`,
+  `_put`, `_delete` or `_patch`. Each one handles that HTTP method at `/rest/<folder path with
+  slashes>` (e.g. `order.api.orders:_get` → `GET /rest/order/api/orders`). Query and body
+  parameters arrive as pipeline inputs, the output pipeline becomes the response body, and
+  `pub.flow:setResponseCode` sets the HTTP status (default 200). REST API descriptors (newer)
+  define paths and methods in the descriptor node instead; read it for the real paths.
+  `[TO CONFIRM]` the URL prefix if the server uses a custom REST directive.
 
 ## flow.xml elements
 | Element | Meaning | Key attributes |
@@ -63,6 +70,8 @@ might differ, state the assumption as `[TO CONFIRM]`.
 | `pub.client:http` | Fails only on transport errors (connection, timeout, bad URL). 4xx/5xx responses return normally with `header/status` | Unless the flow checks `header/status`, error responses (e.g. payment declined) count as success, and REPEAT/TRY doesn't retry them |
 | `REPEAT COUNT="n" LOOP-ON="FAILURE"` | Re-runs its children up to n more times while a child step fails (throws) | Total attempts = n + 1; "failure" means an exception, not a bad response |
 | `BRANCH` `$default` | Matches every value no other case matched, including null/missing and, with label expressions, values that aren't numbers | Word the row "any other value…", not "≤ X". `$null` is a separate label for missing values |
+| `BRANCH` `$null` | Matches only when the variable doesn't exist (or is null). An empty string goes to `$default` or another case | State what happens to an empty value separately |
+| Concurrent triggers / separate triggers on related documents | Documents are processed in parallel and in no guaranteed order across triggers | Check cross-capability races (e.g. a cancel processed before the order it cancels exists) |
 | Label expressions (`%amount% > 1000`) | Pipeline values are usually strings; how they compare to numbers can depend on the IS version and on the value | `[TO CONFIRM]` behaviour for decimals and non-numeric input, especially when the branch runs before validation |
 | `LOOP IN-ARRAY="a/list"` | Inside the loop, `a/list` refers to the *current element*, not the list | Read paths inside a loop as per-item fields |
 | `LOOP OUT-ARRAY="xs"` | Each iteration, the pipeline variable named `xs` is appended to the output list | Check whether `xs` is ever used after the loop |
@@ -72,6 +81,24 @@ might differ, state the assumption as `[TO CONFIRM]`.
 | Value saved by an adapter, then changed | The database keeps the value from the time of the adapter call | State the stored value; a status set afterwards is never saved unless a later call writes it |
 | Pipeline data types | Most values are `String`; `pub.math:*Floats` and Java `double` use binary floating point | List the numeric fields; decide on decimal types for money in a migration |
 | `%var%` in MAPSET with `VARIABLES="true"` | Replaced with the pipeline value at runtime, as text | Map to string building in the target |
+
+## Building the existing architecture by hand
+
+`wm_extract.py` writes `architecture.md`. Without Python, collect the same facts:
+
+- **Packages**: `manifest.v3` `requires` of each package → dependency diagram. A service that
+  calls another package's service without that package in `requires` is an *undeclared*
+  dependency (load-order risk).
+- **Roles**: trigger (hexagon), REST/SOAP entry, trigger-invoked entry, orchestration flow,
+  business-logic Java, data-access adapter, shared utility (used by 2+ capabilities, or in a
+  `util`/`common` folder), data contract (document type).
+- **Capabilities**: each entry point plus everything it reaches through INVOKE.
+- **External systems**: adapter connection aliases and the tables in their SQL; HTTP URLs mapped
+  into `pub.client:http`; documents subscribed by triggers (inbound publishers); REST callers.
+- **Data access matrix**: table × capability → SELECT/INSERT/UPDATE/DELETE.
+- **Observations**: tables written by one capability and read or updated by another, logging or
+  TRY/CATCH used in some capabilities but not others, hard-coded URLs, one connection shared by
+  everything.
 
 ## Common built-ins worth noting in an FSD
 - `pub.flow:getLastError`, `pub.flow:throwExceptionForRetry` → error handling / retry semantics

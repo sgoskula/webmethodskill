@@ -2,7 +2,9 @@
 
 - **Kind:** Java service
 - **Package:** OrderProcessing
+- **Role:** Business logic (Java)
 - **Source dir:** `sample/OrderProcessing/ns/order/process/validateOrder`
+- **Used by capabilities:** order.process:submitOrder
 - **Developer comment:** Validates required order fields and that the amount is a positive number.
 - **Invoked by:** order.process:submitOrder
 

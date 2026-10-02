@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FLOW>
+  <BRANCH SWITCH="orderId">
+    <COMMENT>Reject requests that have no orderId query parameter.</COMMENT>
+    <SEQUENCE NAME="$null">
+      <INVOKE SERVICE="pub.flow:setResponseCode">
+        <MAP MODE="INPUT">
+          <MAPSET FIELD="responseCode"><DATA><Values><value>400</value></Values></DATA></MAPSET>
+          <MAPSET FIELD="reasonPhrase"><DATA><Values><value>Bad Request</value></Values></DATA></MAPSET>
+        </MAP>
+      </INVOKE>
+      <MAP>
+        <MAPSET FIELD="error"><DATA><Values><value>orderId is required</value></Values></DATA></MAPSET>
+      </MAP>
+      <EXIT FROM="$flow" SIGNAL="SUCCESS"/>
+    </SEQUENCE>
+    <SEQUENCE NAME="$default"/>
+  </BRANCH>
+
+  <INVOKE SERVICE="order.jdbc:selectOrder">
+    <MAP MODE="INPUT">
+      <MAPCOPY FROM="orderId" TO="orderId"/>
+    </MAP>
+    <MAP MODE="OUTPUT">
+      <MAPCOPY FROM="results" TO="results"/>
+    </MAP>
+  </INVOKE>
+
+  <INVOKE SERVICE="pub.list:sizeOfList">
+    <MAP MODE="INPUT">
+      <MAPCOPY FROM="results" TO="fromList"/>
+    </MAP>
+    <MAP MODE="OUTPUT">
+      <MAPCOPY FROM="size" TO="resultCount"/>
+    </MAP>
+  </INVOKE>
+
+  <BRANCH SWITCH="resultCount">
+    <SEQUENCE NAME="0">
+      <INVOKE SERVICE="pub.flow:setResponseCode">
+        <MAP MODE="INPUT">
+          <MAPSET FIELD="responseCode"><DATA><Values><value>404</value></Values></DATA></MAPSET>
+          <MAPSET FIELD="reasonPhrase"><DATA><Values><value>Not Found</value></Values></DATA></MAPSET>
+        </MAP>
+      </INVOKE>
+      <MAP>
+        <MAPSET FIELD="error"><DATA><Values><value>Order not found</value></Values></DATA></MAPSET>
+      </MAP>
+      <EXIT FROM="$flow" SIGNAL="SUCCESS"/>
+    </SEQUENCE>
+    <SEQUENCE NAME="$default">
+      <MAP>
+        <MAPCOPY FROM="results/ORDER_ID" TO="order/orderId"/>
+        <MAPCOPY FROM="results/STATUS" TO="order/status"/>
+        <MAPCOPY FROM="results/AMOUNT" TO="order/amount"/>
+      </MAP>
+    </SEQUENCE>
+  </BRANCH>
+
+  <INVOKE SERVICE="common.util:logEvent">
+    <MAP MODE="INPUT">
+      <MAPSET FIELD="eventType"><DATA><Values><value>ORDER_QUERY</value></Values></DATA></MAPSET>
+      <MAPCOPY FROM="orderId" TO="orderId"/>
+    </MAP>
+  </INVOKE>
+</FLOW>
