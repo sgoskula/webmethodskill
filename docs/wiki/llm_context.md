@@ -3,6 +3,7 @@
 Facts extracted from webMethods Integration Server packages. Answer only from this text.
 
 ## Capabilities
+- fulfil.process:notifyPartner: Entry: not invoked by any scanned service (scheduler, manual or external caller?)
 - fulfil.process:orchestrateFulfillment: Entry: trigger fulfil.triggers:fulfilTrigger
 - order.api.orders:_get: Entry: REST GET /rest/order/api/orders
 - order.process:cancelOrder: Entry: trigger order.triggers:cancelTrigger
@@ -11,6 +12,7 @@ Facts extracted from webMethods Integration Server packages. Answer only from th
 ## Findings
 - fulfil.process:allocateStock: REPEAT with `COUNT=-1` on FAILURE has no upper bound: if the body keeps failing the flow never gives up and never reaches its error handling. A re-implementation needs an explicit maximum or timeout, so ask what it should be
 - fulfil.process:allocateStock: BRANCH on `httpStatus` has no `$default`: values matching no case skip the branch silently
+- fulfil.process:notifyPartner: `partnerName` is set but never used afterwards (not read later, not a declared output). Either it is dead logic or a step is missing
 - fulfil.process:orchestrateFulfillment: BRANCH on `orderStatus` has no `$default`: values matching no case skip the branch silently
 - fulfil.process:orchestrateFulfillment: `EXIT $flow FAILURE` ("Stock allocation failed") sits inside TRY [allocation], so it is caught by that TRY's CATCH and does not reach the caller as written. What the caller sees depends on what the CATCH does (swallow, rethrow, or its own EXIT)
 - fulfil.process:orchestrateFulfillment: BRANCH on `lastAllocated` has no `$default`: values matching no case skip the branch silently
@@ -33,8 +35,9 @@ Facts extracted from webMethods Integration Server packages. Answer only from th
 - order.triggers:orderTrigger: Trigger retries only happen when `order.process:submitOrder` throws an ISRuntimeException (for example via `pub.flow:throwExceptionForRetry` or a transient adapter error). Its call tree never does this explicitly, so ordinary failures are not retried
 - Package `FulfillmentEngine` calls `OrderProcessing` (1 call(s)) but doesn't declare it in manifest.v3 `requires`, so load order isn't guaranteed
 - Table `ORDERS` is shared by 4 capabilities (`fulfil.process:orchestrateFulfillment` SELECT; `order.api.orders:_get` SELECT; `order.process:cancelOrder` UPDATE; `order.process:submitOrder` INSERT). Document its lifecycle across capabilities and check how they interact (ordering, status assumptions, concurrency)
-- Logging is inconsistent: `fulfil.process:orchestrateFulfillment` logs, `order.api.orders:_get` logs, `order.process:cancelOrder` logs, `order.process:submitOrder` has no logging
-- Error handling is inconsistent: `fulfil.process:orchestrateFulfillment` uses TRY/CATCH, `order.api.orders:_get` has no TRY/CATCH, `order.process:cancelOrder` has no TRY/CATCH, `order.process:submitOrder` uses TRY/CATCH
+- Trading Networks is used by `fulfil.process:notifyPartner`. Partner profiles, document types, processing rules and delivery settings live in TN, not in these packages, so the real routing and delivery behaviour cannot be read from the code [TO CONFIRM: export of the TN processing rules, partner profiles and document types]
+- Logging is inconsistent: `fulfil.process:notifyPartner` has no logging, `fulfil.process:orchestrateFulfillment` logs, `order.api.orders:_get` logs, `order.process:cancelOrder` logs, `order.process:submitOrder` has no logging
+- Error handling is inconsistent: `fulfil.process:notifyPartner` has no TRY/CATCH, `fulfil.process:orchestrateFulfillment` uses TRY/CATCH, `order.api.orders:_get` has no TRY/CATCH, `order.process:cancelOrder` has no TRY/CATCH, `order.process:submitOrder` uses TRY/CATCH
 - Hard-coded URL `http://wms.internal/stock/reserve` in `fulfil.process:allocateStock` instead of an endpoint alias or configuration value
 - Hard-coded URL `https://carrier.example/api/book` in `fulfil.process:orchestrateFulfillment` instead of an endpoint alias or configuration value
 - Hard-coded URL `https://payments.internal/charge` in `order.process:submitOrder` instead of an endpoint alias or configuration value
@@ -153,6 +156,68 @@ BRANCH on httpStatus
 **Semantic flags (verify, then carry into the FSD)**
 - REPEAT with `COUNT=-1` on FAILURE has no upper bound: if the body keeps failing the flow never gives up and never reaches its error handling. A re-implementation needs an explicit maximum or timeout, so ask what it should be
 - BRANCH on `httpStatus` has no `$default`: values matching no case skip the branch silently
+
+### fulfil.process:notifyPartner
+**Overview**
+# fulfil.process:notifyPartner
+
+- **Kind:** Flow service
+- **Package:** FulfillmentEngine
+- **Role:** Entry: not invoked by any scanned service (scheduler, manual or external caller?)
+- **Source dir:** `sample/FulfillmentEngine/ns/fulfil/process/notifyPartner`
+- **Used by capabilities:** fulfil.process:notifyPartner
+- **Developer comment:** Sends a ship notice to the trading partner through Trading Networks. Service names are illustrative.
+
+**Signature**
+**Inputs:**
+
+| Field | Type | Flags | Comment |
+|---|---|---|---|
+| `orderId` | string |  |  |
+| `partnerId` | string |  |  |
+| `shipNoticeXml` | object |  |  |
+
+**Outputs:**
+
+| Field | Type | Flags | Comment |
+|---|---|---|---|
+| `delivered` | string |  |  |
+
+**Invokes**
+- `wm.tn.doc:setUserStatus` — Trading Networks
+- `wm.tn.profile:getProfile` — Trading Networks
+- `wm.tn:receive` — Trading Networks
+- `wm.tn:route` — Trading Networks
+
+**Logic (pseudocode, generated from flow.xml)**
+```text
+# Look up the partner; its delivery method is configured in TN, not here.
+INVOKE wm.tn.profile:getProfile   ⟵ Trading Networks
+  input: partnerID ← partnerId
+  output: partnerName ← profile/corporationName
+# Hand the ship notice to TN; recognition picks the document type.
+INVOKE wm.tn:receive   ⟵ Trading Networks
+  input: bizdoc/content ← shipNoticeXml; set DocumentType = "ShipNotice"; set SenderID = "FULFIL-HUB"; ReceiverID ← partnerId; set apiPassword = "***redacted***"
+  output: bizdocId ← bizdoc/InternalID
+INVOKE wm.tn.doc:setUserStatus   ⟵ Trading Networks
+  input: InternalID ← bizdocId; set userStatus = "SHIPNOTICE_SENT"
+INVOKE wm.tn:route   ⟵ Trading Networks
+  input: bizdoc/InternalID ← bizdocId
+# Direct delivery, replaced by the processing rule that fires on route.
+(INVOKE wm.tn.out:deliver DISABLED — not executed)
+MAP: set delivered = "true"
+```
+
+**Trading Networks calls**
+| Operation | Service | Inputs |
+|---|---|---|
+| Partner profile | `wm.tn.profile:getProfile` | partnerID ← partnerId |
+| Receive and recognise a document | `wm.tn:receive` | bizdoc/content ← shipNoticeXml; DocumentType = "ShipNotice"; SenderID = "FULFIL-HUB"; ReceiverID ← partnerId; apiPassword = "***redacted***" |
+| Update document status or attributes | `wm.tn.doc:setUserStatus` | InternalID ← bizdocId; userStatus = "SHIPNOTICE_SENT" |
+| Route a document (processing rules decide the outcome) | `wm.tn:route` | bizdoc/InternalID ← bizdocId |
+
+**Semantic flags (verify, then carry into the FSD)**
+- `partnerName` is set but never used afterwards (not read later, not a declared output). Either it is dead logic or a step is missing
 
 ### fulfil.process:orchestrateFulfillment
 **Overview**

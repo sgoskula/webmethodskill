@@ -53,6 +53,47 @@ def classify_invoke(svc):
     return None
 
 
+# Trading Networks: calls are grouped by what they do. TN's own tables, partner profiles and processing
+# rules are not in IS packages, so only the calls and their mapped inputs can be extracted.
+TN_OPERATIONS = [
+    (r"receive|recogni[sz]e|submit", "Receive and recognise a document"),
+    (r"route|rule", "Route a document (processing rules decide the outcome)"),
+    (r"deliver|send|queue", "Deliver to a partner"),
+    (r"profile|partner|corporation", "Partner profile"),
+    (r"status|update|setuser", "Update document status or attributes"),
+    (r"attribute", "Update document status or attributes"),
+    (r"query|find|search|get|view|content|bizdoc", "Query or read a document"),
+    (r"log|event|activity", "Activity log"),
+]
+TN_KEY_RE = re.compile(r"doc(ument)?type|sender|receiver|partner|profile|attribute|status|rule|protocol|queue|"
+                       r"delivery|service|name|id", re.I)
+SECRET_KEY_RE = re.compile(r"pass(word)?|secret|token|credential", re.I)
+
+
+def tn_operation(svc):
+    tail = svc.lower().replace("wm.tn", "", 1)
+    for pat, label in TN_OPERATIONS:
+        if re.search(pat, tail):
+            return label
+    return "Other Trading Networks service"
+
+
+def tn_inputs(invoke_el):
+    """Literal values and mapped sources for the inputs of a TN call, secrets redacted."""
+    out = []
+    for m in invoke_el.findall("MAP"):
+        if m.get("MODE", "").upper() != "INPUT":
+            continue
+        for c in m:
+            field = clean_path(c.get("FIELD") or c.get("TO"))
+            if c.tag == "MAPSET":
+                v = "***redacted***" if SECRET_KEY_RE.search(field) else mapset_value(c)
+                out.append(f'{field} = "{v}"')
+            elif c.tag == "MAPCOPY":
+                out.append(f"{field} ← {clean_path(c.get('FROM'))}")
+    return out
+
+
 # ---------------------------------------------------------------- IData (node.ndf) parsing
 def idata_to_py(el):
     tag = el.tag.lower()
@@ -146,7 +187,7 @@ def describe_map(map_el):
         if t == "MAPCOPY":
             ops.append(f"{clean_path(c.get('TO'))} ← {clean_path(c.get('FROM'))}")
         elif t == "MAPSET":
-            val = mapset_value(c)
+            val = "***redacted***" if SECRET_KEY_RE.search(clean_path(c.get("FIELD"))) else mapset_value(c)
             var = " (with %var% substitution)" if c.get("VARIABLES") == "true" else ""
             ops.append(f'set {clean_path(c.get("FIELD"))} = "{val}"{var}')
         elif t == "MAPDELETE":
@@ -201,6 +242,7 @@ class FlowWalker:
         self.name_stack = []   # names of enclosing SEQUENCEs, used to resolve EXIT targets
         self.try_exits = {}    # TRY node id -> flowchart nodes of EXIT FAILUREs caught by its CATCH
         self.fail_exits = []   # (node id, EXIT target) for every EXIT FAILURE, used for REPEAT retry edges
+        self.tn_calls = []       # Trading Networks calls: {"service", "operation", "inputs"}
         self.error_vars = set()  # pipeline vars that receive pub.flow:getLastError output
 
     def ev(self, kind, path, extra=None):
@@ -242,6 +284,9 @@ class FlowWalker:
                             self.endpoints.append(mapset_value(c) if c.tag == "MAPSET"
                                                   else f"(dynamic, from {clean_path(c.get('FROM'))})")
         self.ev("invoke", el.get("SERVICE", "?"), tuple(reads))
+        if el.get("DISABLED") != "true" and el.get("SERVICE", "").startswith("wm.tn"):
+            self.tn_calls.append({"service": el.get("SERVICE"), "operation": tn_operation(el.get("SERVICE")),
+                                  "inputs": tn_inputs(el)})
         for m in el.findall("MAP"):
             if m.get("MODE", "").upper() == "OUTPUT":
                 self.map_events(m, "OUTPUT")
@@ -443,7 +488,7 @@ def parse_flow(path):
         root = ET.parse(path).getroot()
     except Exception as exc:
         return {"error": str(exc), "lines": [], "invokes": [], "mermaid": "", "events": [], "notes": [],
-                "endpoints": []}
+                "endpoints": [], "tn_calls": []}
     w = FlowWalker()
     start = w.new_node("Start", "stad")
     ends = w.walk_children(root, 0, [start])
@@ -452,7 +497,7 @@ def parse_flow(path):
     mermaid = "" if w.truncated else "flowchart TD\n" + "\n".join(w.mm)
     return {"lines": w.lines, "invokes": w.invokes, "mermaid": mermaid, "truncated": w.truncated,
             "events": w.events, "notes": w.notes, "endpoints": w.endpoints,
-            "error_vars": sorted(w.error_vars)}
+            "error_vars": sorted(w.error_vars), "tn_calls": w.tn_calls}
 
 
 # ---------------------------------------------------------------- java source
@@ -684,6 +729,12 @@ def build_architecture(pkgs, nodes, referenced, entry, triggered, external):
             if c in nodes and pkg_of[c] != n["package"]:
                 cross[(n["package"], pkg_of[c])].add(f"{k} → {c}")
 
+    tn = defaultdict(lambda: defaultdict(list))  # operation -> caller -> calls
+    for k, n in nodes.items():
+        for call in (n.get("flow") or {}).get("tn_calls", []):
+            tn[call["operation"]][k].append(call)
+    tn_json = {op: {k: calls for k, calls in sorted(cs.items())} for op, cs in sorted(tn.items())}
+
     systems = []
     by_conn = defaultdict(lambda: [set(), set()])
     for a, info in adapters.items():
@@ -691,6 +742,8 @@ def build_architecture(pkgs, nodes, referenced, entry, triggered, external):
         by_conn[info["connection"] or "(unknown connection)"][1].add(a)
     for c, (tables, ads) in sorted(by_conn.items()):
         systems.append(("Database (outbound)", f"connection `{c}`, tables {', '.join(sorted(tables)) or '?'}", sorted(ads)))
+    for op, cs in sorted(tn.items()):
+        systems.append(("Trading Networks (partner/document hub)", op, sorted(cs)))
     eps_by = defaultdict(set)
     for s, eps in endpoints.items():
         for e in eps:
@@ -717,6 +770,12 @@ def build_architecture(pkgs, nodes, referenced, entry, triggered, external):
             desc = "; ".join(f"`{r}` {'/'.join(sorted(ops))}" for r, ops in sorted(caps.items()))
             obs.append(f"Table `{t}` is shared by {len(caps)} capabilities ({desc}). Document its lifecycle across "
                        "capabilities and check how they interact (ordering, status assumptions, concurrency)")
+    if tn:
+        callers = sorted({k for cs in tn.values() for k in cs})
+        obs.append("Trading Networks is used by " + ", ".join(f"`{c}`" for c in callers) + ". Partner profiles, "
+                   "document types, processing rules and delivery settings live in TN, not in these packages, so "
+                   "the real routing and delivery behaviour cannot be read from the code [TO CONFIRM: export of "
+                   "the TN processing rules, partner profiles and document types]")
     has_log = {r: any(re.search("log", s.split(":")[-1], re.I) for s in reach[r]) for r in roots}
     if any(has_log.values()) and not all(has_log.values()):
         obs.append("Logging is inconsistent: " + ", ".join(
@@ -831,6 +890,7 @@ def build_architecture(pkgs, nodes, referenced, entry, triggered, external):
         "cross_package_calls": {f"{a} -> {b}": sorted(c) for (a, b), c in cross.items()},
         "systems": [{"type": a, "detail": b, "used_by": c} for a, b, c in systems],
         "observations": obs,
+        "trading_networks": tn_json,
         "package_mermaid": "\n".join(pkg_mm),
         "component_mermaid": "\n".join(comp_mm),
         "component_diagram_level": "component" if detailed else "folder",
@@ -870,6 +930,14 @@ def architecture_md(arch, pkgs, nodes):
            "|---|" + "---|" * len(roots)]
     for t, caps in sorted(arch["data_access"].items()):
         md.append(f"| `{t}` | " + " | ".join("/".join(caps.get(r, [])) or "-" for r in roots) + " |")
+    if arch["trading_networks"]:
+        md += ["", "## Trading Networks calls (grouped by operation)",
+               "Partner profiles, document types and processing rules are configured in TN, outside the packages.", ""]
+        for op, cs in arch["trading_networks"].items():
+            md += [f"### {op}", "| Caller | Service | Inputs |", "|---|---|---|"]
+            md += [f"| `{k}` | `{c['service']}` | {'; '.join(c['inputs']).replace('|', chr(92) + '|') or '-'} |"
+                   for k, calls in cs.items() for c in calls]
+            md.append("")
     md += ["", "## Document type usage", "| Document type | Used by |", "|---|---|"]
     md += [f"| `{d}` | {', '.join(f'`{u}`' for u in us) or 'unused'} |" for d, us in sorted(arch["doc_usage"].items())]
     md += ["", "## Architecture observations (verify, then carry into the FSD)"]
@@ -941,9 +1009,13 @@ def main():
         if fl:
             calls = sorted(set(fl["invokes"]))
             md += ["", "## Invokes", *(f"- `{c}`" + (f" — {classify_invoke(c)}" if classify_invoke(c) else "")
-                                        + ("" if c in nodes or c.startswith("pub.") else " — **outside scanned packages**")
+                                        + ("" if c in nodes or c.startswith("pub.") or classify_invoke(c) else " — **outside scanned packages**")
                                         for c in calls)]
             md += ["", "## Logic (pseudocode, generated from flow.xml)", "```text", *fl["lines"], "```"]
+            if fl.get("tn_calls"):
+                md += ["", "## Trading Networks calls", "| Operation | Service | Inputs |", "|---|---|---|"]
+                md += [f"| {c['operation']} | `{c['service']}` | {'; '.join(c['inputs']).replace('|', chr(92) + '|') or '-'} |"
+                       for c in fl["tn_calls"]]
             if fl.get("mermaid"):
                 md += ["", "## Flowchart", "```mermaid", fl["mermaid"], "```"]
             elif fl.get("truncated"):
@@ -997,6 +1069,9 @@ def main():
             "## Services referenced by triggers / REST / WSD / other config nodes",
             *(f"- `{t}` ← {', '.join(sorted(referenced[t]))}" for t in triggered), "",
             "## Integrations detected", *(f"- **{k}**: {', '.join(sorted(v))}" for k, v in sorted(integrations.items())), "",
+            *(["## Trading Networks usage (details in architecture.md)",
+               *(f"- **{op}**: {', '.join(f'`{k}`' for k in cs)}" for op, cs in arch["trading_networks"].items()), ""]
+              if arch["trading_networks"] else []),
             "## Calls to services outside scanned packages", *(f"- `{k}` ← {', '.join(sorted(v))}" for k, v in sorted(external.items())), "",
             "## Semantic flags (each must be addressed in the FSD)",
             *(f"- `{k}`: {x}" for k in sorted(flags) for x in flags[k]), "",

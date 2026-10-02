@@ -9,7 +9,7 @@ Facts for the FSD's Existing Architecture section. Capabilities are named by the
 |---|---|---|---|---|---|
 | `OrderProcessing` | 1.0 | WmPublic, CommonUtils | - | - | 11 |
 | `CommonUtils` | 1.0 | WmPublic | - | - | 1 |
-| `FulfillmentEngine` | 2.1 | WmPublic, CommonUtils | - | - | 5 |
+| `FulfillmentEngine` | 2.1 | WmPublic, CommonUtils | - | - | 6 |
 
 ## Package dependencies
 Solid arrow: declared dependency on a scanned package. Dotted: package not scanned. Labelled `undeclared`: called but not declared.
@@ -40,6 +40,7 @@ flowchart LR
 | `common.util:logEvent` | CommonUtils | Flow service | Shared utility | `orchestrateFulfillment`, `_get`, `cancelOrder` |
 | `fulfil.docs:FulfilDoc` | FulfillmentEngine | Document type | Data contract (document type) | `orchestrateFulfillment` |
 | `fulfil.process:allocateStock` | FulfillmentEngine | Flow service | Orchestration (flow) | `orchestrateFulfillment` |
+| `fulfil.process:notifyPartner` | FulfillmentEngine | Flow service | Entry: not invoked by any scanned service (scheduler, manual or external caller?) | `notifyPartner` |
 | `fulfil.process:orchestrateFulfillment` | FulfillmentEngine | Flow service | Entry: trigger fulfil.triggers:fulfilTrigger | `orchestrateFulfillment` |
 | `fulfil.triggers:fulfilTrigger` | FulfillmentEngine | Trigger | Trigger (subscription) | `orchestrateFulfillment` |
 | `fulfil.util:computeShipping` | FulfillmentEngine | Flow service | Shared utility | `orchestrateFulfillment` |
@@ -68,6 +69,7 @@ flowchart LR
   subgraph p_pk_FulfillmentEngine["Package FulfillmentEngine"]
     subgraph fd_FulfillmentEngine_fulfil_process["fulfil.process"]
       s_fulfil_process_allocateStock["allocateStock"]
+      s_fulfil_process_notifyPartner["notifyPartner"]
       s_fulfil_process_orchestrateFulfillment["orchestrateFulfillment"]
     end
     subgraph fd_FulfillmentEngine_fulfil_triggers["fulfil.triggers"]
@@ -132,6 +134,7 @@ flowchart LR
 ## Capabilities and their components
 | Capability (entry) | Components |
 |---|---|
+| `fulfil.process:notifyPartner` | `fulfil.process:notifyPartner` |
 | `fulfil.process:orchestrateFulfillment` | `common.util:logEvent`, `fulfil.process:allocateStock`, `fulfil.process:orchestrateFulfillment`, `fulfil.triggers:fulfilTrigger`, `fulfil.util:computeShipping`, `order.jdbc:selectOrder` |
 | `order.api.orders:_get` | `common.util:logEvent`, `order.api.orders:_get`, `order.jdbc:selectOrder` |
 | `order.process:cancelOrder` | `common.util:logEvent`, `order.jdbc:updateOrderStatus`, `order.process:cancelOrder`, `order.triggers:cancelTrigger` |
@@ -145,6 +148,10 @@ flowchart LR
 | Type | Detail | Used by |
 |---|---|---|
 | Database (outbound) | connection `OrderDB_Conn`, tables ORDERS | `order.jdbc:insertOrder`, `order.jdbc:selectOrder`, `order.jdbc:updateOrderStatus` |
+| Trading Networks (partner/document hub) | Partner profile | `fulfil.process:notifyPartner` |
+| Trading Networks (partner/document hub) | Receive and recognise a document | `fulfil.process:notifyPartner` |
+| Trading Networks (partner/document hub) | Route a document (processing rules decide the outcome) | `fulfil.process:notifyPartner` |
+| Trading Networks (partner/document hub) | Update document status or attributes | `fulfil.process:notifyPartner` |
 | HTTP endpoint (outbound) | `http://wms.internal/stock/reserve` | `fulfil.process:allocateStock` |
 | HTTP endpoint (outbound) | `https://carrier.example/api/book` | `fulfil.process:orchestrateFulfillment` |
 | HTTP endpoint (outbound) | `https://payments.internal/charge` | `order.process:submitOrder` |
@@ -154,9 +161,33 @@ flowchart LR
 | REST client (inbound) | GET /rest/order/api/orders | `order.api.orders:_get` |
 
 ## Data access by capability
-| Table | `orchestrateFulfillment` | `_get` | `cancelOrder` | `submitOrder` |
-|---|---|---|---|---|
-| `ORDERS` | SELECT | SELECT | UPDATE | INSERT |
+| Table | `notifyPartner` | `orchestrateFulfillment` | `_get` | `cancelOrder` | `submitOrder` |
+|---|---|---|---|---|---|
+| `ORDERS` | - | SELECT | SELECT | UPDATE | INSERT |
+
+## Trading Networks calls (grouped by operation)
+Partner profiles, document types and processing rules are configured in TN, outside the packages.
+
+### Partner profile
+| Caller | Service | Inputs |
+|---|---|---|
+| `fulfil.process:notifyPartner` | `wm.tn.profile:getProfile` | partnerID ← partnerId |
+
+### Receive and recognise a document
+| Caller | Service | Inputs |
+|---|---|---|
+| `fulfil.process:notifyPartner` | `wm.tn:receive` | bizdoc/content ← shipNoticeXml; DocumentType = "ShipNotice"; SenderID = "FULFIL-HUB"; ReceiverID ← partnerId; apiPassword = "***redacted***" |
+
+### Route a document (processing rules decide the outcome)
+| Caller | Service | Inputs |
+|---|---|---|
+| `fulfil.process:notifyPartner` | `wm.tn:route` | bizdoc/InternalID ← bizdocId |
+
+### Update document status or attributes
+| Caller | Service | Inputs |
+|---|---|---|
+| `fulfil.process:notifyPartner` | `wm.tn.doc:setUserStatus` | InternalID ← bizdocId; userStatus = "SHIPNOTICE_SENT" |
+
 
 ## Document type usage
 | Document type | Used by |
@@ -168,8 +199,9 @@ flowchart LR
 ## Architecture observations (verify, then carry into the FSD)
 - Package `FulfillmentEngine` calls `OrderProcessing` (1 call(s)) but doesn't declare it in manifest.v3 `requires`, so load order isn't guaranteed
 - Table `ORDERS` is shared by 4 capabilities (`fulfil.process:orchestrateFulfillment` SELECT; `order.api.orders:_get` SELECT; `order.process:cancelOrder` UPDATE; `order.process:submitOrder` INSERT). Document its lifecycle across capabilities and check how they interact (ordering, status assumptions, concurrency)
-- Logging is inconsistent: `fulfil.process:orchestrateFulfillment` logs, `order.api.orders:_get` logs, `order.process:cancelOrder` logs, `order.process:submitOrder` has no logging
-- Error handling is inconsistent: `fulfil.process:orchestrateFulfillment` uses TRY/CATCH, `order.api.orders:_get` has no TRY/CATCH, `order.process:cancelOrder` has no TRY/CATCH, `order.process:submitOrder` uses TRY/CATCH
+- Trading Networks is used by `fulfil.process:notifyPartner`. Partner profiles, document types, processing rules and delivery settings live in TN, not in these packages, so the real routing and delivery behaviour cannot be read from the code [TO CONFIRM: export of the TN processing rules, partner profiles and document types]
+- Logging is inconsistent: `fulfil.process:notifyPartner` has no logging, `fulfil.process:orchestrateFulfillment` logs, `order.api.orders:_get` logs, `order.process:cancelOrder` logs, `order.process:submitOrder` has no logging
+- Error handling is inconsistent: `fulfil.process:notifyPartner` has no TRY/CATCH, `fulfil.process:orchestrateFulfillment` uses TRY/CATCH, `order.api.orders:_get` has no TRY/CATCH, `order.process:cancelOrder` has no TRY/CATCH, `order.process:submitOrder` uses TRY/CATCH
 - Hard-coded URL `http://wms.internal/stock/reserve` in `fulfil.process:allocateStock` instead of an endpoint alias or configuration value
 - Hard-coded URL `https://carrier.example/api/book` in `fulfil.process:orchestrateFulfillment` instead of an endpoint alias or configuration value
 - Hard-coded URL `https://payments.internal/charge` in `order.process:submitOrder` instead of an endpoint alias or configuration value

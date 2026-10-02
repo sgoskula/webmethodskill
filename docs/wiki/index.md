@@ -10,6 +10,7 @@ Generated from the webMethods packages. Every page is derived from the code; not
 
 ## Capabilities (entry points)
 
+- [`fulfil.process:notifyPartner`](capabilities/fulfil.process__notifyPartner.md) - Entry: not invoked by any scanned service (scheduler, manual or external caller?) (1 components)
 - [`fulfil.process:orchestrateFulfillment`](capabilities/fulfil.process__orchestrateFulfillment.md) - Entry: trigger fulfil.triggers:fulfilTrigger (6 components)
 - [`order.api.orders:_get`](capabilities/order.api.orders___get.md) - Entry: REST GET /rest/order/api/orders (3 components)
 - [`order.process:cancelOrder`](capabilities/order.process__cancelOrder.md) - Entry: trigger order.triggers:cancelTrigger (4 components)
@@ -23,12 +24,14 @@ Generated from the webMethods packages. Every page is derived from the code; not
 
 - [Architecture](architecture.md)
 - [Findings](findings.md)
+- [Trading Networks usage](trading-networks.md)
 
 ## All components
 
 - [`common.util:logEvent`](services/common.util__logEvent.md) - Flow service; Shared utility
 - [`fulfil.docs:FulfilDoc`](services/fulfil.docs__FulfilDoc.md) - Document type; Data contract (document type)
 - [`fulfil.process:allocateStock`](services/fulfil.process__allocateStock.md) - Flow service; Orchestration (flow)
+- [`fulfil.process:notifyPartner`](services/fulfil.process__notifyPartner.md) - Flow service; Entry: not invoked by any scanned service (scheduler, manual or external caller?)
 - [`fulfil.process:orchestrateFulfillment`](services/fulfil.process__orchestrateFulfillment.md) - Flow service; Entry: trigger fulfil.triggers:fulfilTrigger
 - [`fulfil.triggers:fulfilTrigger`](services/fulfil.triggers__fulfilTrigger.md) - Trigger; Trigger (subscription)
 - [`fulfil.util:computeShipping`](services/fulfil.util__computeShipping.md) - Flow service; Shared utility

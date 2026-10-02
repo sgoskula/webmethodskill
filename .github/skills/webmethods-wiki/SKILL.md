@@ -54,5 +54,5 @@ logic and their callees' logic), and the question. Read that context, then answe
 
 ## Limits to state when relevant
 
-The wiki reflects only the scanned packages. Scheduler tasks, JDBC connection settings, endpoint aliases,
+The wiki reflects only the scanned packages. For Trading Networks it has the calls (`trading-networks.md`: operation, literal document type, sender, receiver, status) but not the partner profiles, document types or processing rules, which live in TN. Scheduler tasks, JDBC connection settings, endpoint aliases,
 global variables and Trading Networks rules live outside packages: say so instead of guessing.

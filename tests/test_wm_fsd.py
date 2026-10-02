@@ -291,6 +291,80 @@ class WikiTest(unittest.TestCase):
         self.assertLess(len(out), 9000)
 
 
+class TradingNetworksTest(unittest.TestCase):
+    """wm.tn calls are grouped by operation, with literal inputs and no secrets."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        pkgs = [os.path.join(ROOT, "sample", p) for p in ("OrderProcessing", "CommonUtils", "FulfillmentEngine")]
+        cls.extract = os.path.join(cls.tmp.name, "extract")
+        cls.wiki = os.path.join(cls.tmp.name, "wiki")
+        subprocess.run([sys.executable, os.path.join(SCRIPTS, "wm_extract.py"), "--out", cls.extract, *pkgs],
+                       check=True, capture_output=True)
+        subprocess.run([sys.executable, os.path.join(WIKI_SCRIPTS, "wm_wiki.py"), "--extract", cls.extract,
+                        "--out", cls.wiki], check=True, capture_output=True)
+        with open(os.path.join(cls.extract, "inventory.json")) as f:
+            cls.tn = json.load(f)["architecture"]["trading_networks"]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def read(self, base, rel):
+        with open(os.path.join(base, rel)) as f:
+            return f.read()
+
+    NOTIFY = "fulfil.process:notifyPartner"
+
+    def test_calls_grouped_by_operation(self):
+        got = {op: [c["service"] for calls in cs.values() for c in calls] for op, cs in self.tn.items()}
+        self.assertEqual(got["Partner profile"], ["wm.tn.profile:getProfile"])
+        self.assertEqual(got["Receive and recognise a document"], ["wm.tn:receive"])
+        self.assertEqual(got["Route a document (processing rules decide the outcome)"], ["wm.tn:route"])
+        self.assertEqual(got["Update document status or attributes"], ["wm.tn.doc:setUserStatus"])
+
+    def test_disabled_call_not_recorded(self):
+        services = [c["service"] for cs in self.tn.values() for calls in cs.values() for c in calls]
+        self.assertNotIn("wm.tn.out:deliver", services)
+
+    def test_literal_inputs_captured_and_secrets_redacted(self):
+        recv = self.tn["Receive and recognise a document"][self.NOTIFY][0]["inputs"]
+        self.assertIn('DocumentType = "ShipNotice"', recv)
+        self.assertIn('SenderID = "FULFIL-HUB"', recv)
+        self.assertIn("ReceiverID ← partnerId", recv)
+        self.assertIn('apiPassword = "***redacted***"', recv)
+        for rel in ("architecture.md", "inventory.md", "inventory.json"):
+            self.assertNotIn("do-not-copy-me", self.read(self.extract, rel))
+        self.assertNotIn("do-not-copy-me", self.read(self.wiki, "llm_context.md"))
+
+    def test_architecture_and_observation(self):
+        arch = self.read(self.extract, "architecture.md")
+        self.assertIn("## Trading Networks calls (grouped by operation)", arch)
+        self.assertIn("Trading Networks (partner/document hub)", arch)
+        self.assertIn("[TO CONFIRM: export of the TN processing rules", self.read(self.extract, "inventory.md"))
+        svc = self.read(self.extract, "services/fulfil.process__notifyPartner.md")
+        self.assertIn("## Trading Networks calls", svc)
+        self.assertNotIn("`wm.tn:route` — Trading Networks — **outside scanned packages**", svc)
+
+    def test_wiki_page_and_question(self):
+        self.assertIn("trading-networks.md", self.read(self.wiki, "index.md"))
+        page = self.read(self.wiki, "trading-networks.md")
+        self.assertIn("## Route a document", page)
+        self.assertIn("(services/fulfil.process__notifyPartner.md)", page)
+        out = subprocess.run([sys.executable, os.path.join(WIKI_SCRIPTS, "wm_ask.py"), "--wiki", self.wiki,
+                              "--sources", "how is the ship notice sent to the trading partner and delivered"],
+                             check=True, capture_output=True, text=True).stdout
+        self.assertIn("Trading Networks", out)
+
+    def test_no_tn_means_no_tn_sections(self):
+        with tempfile.TemporaryDirectory() as out:
+            subprocess.run([sys.executable, os.path.join(SCRIPTS, "wm_extract.py"), "--out", out, *PACKAGES],
+                           check=True, capture_output=True)
+            self.assertNotIn("Trading Networks", self.read(out, "architecture.md"))
+            self.assertNotIn("Trading Networks", self.read(out, "inventory.md"))
+
+
 class LargeApplicationTest(unittest.TestCase):
     def test_component_diagram_falls_back_to_folder_level(self):
         with tempfile.TemporaryDirectory() as out, \

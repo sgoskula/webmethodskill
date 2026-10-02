@@ -151,6 +151,23 @@ def main():
             f"{c} {'/'.join(o)}" for c, o in sorted(caps.items())) + ". Adapters: " + ", ".join(users), t)
         tbl_links.append(f"- [`{t}`](tables/{safe(t)}.md) - used by {len(caps)} capabilit(y/ies)")
 
+    # ---- Trading Networks
+    tn = arch.get("trading_networks", {})
+    if tn:
+        body = ["# Trading Networks usage", "", "[← index](index.md)", "",
+                "Calls to Trading Networks, grouped by operation. Partner profiles, document types, processing rules "
+                "and delivery settings are configured in TN, outside the packages, so they are not in this wiki.", ""]
+        for op, cs in tn.items():
+            body += [f"## {op}", ""]
+            for k, calls in cs.items():
+                for c in calls:
+                    inputs = "; ".join(c["inputs"]) or "no mapped inputs"
+                    body.append(f"- [`{k}`](services/{safe(k)}.md) calls `{c['service']}`: {inputs}")
+                    add_chunk("trading-networks.md", f"Trading Networks - {op}",
+                              f"[Trading Networks: {op}] {k} calls {c['service']} with {inputs}", k)
+            body.append("")
+        write(os.path.join(a.out, "trading-networks.md"), "\n".join(body))
+
     # ---- findings
     fnd = ["# Findings", "", "[← index](index.md)", "", "Automatic leads from the extractor: verify before relying "
            "on them.", "", "## Per service", ""]
@@ -180,7 +197,9 @@ def main():
             for p in inv["packages"]]
     idx += ["", "## Capabilities (entry points)", ""] + cap_links
     idx += ["", "## Tables", ""] + (tbl_links or ["- none"])
-    idx += ["", "## Other", "", "- [Architecture](architecture.md)", "- [Findings](findings.md)", "",
+    idx += ["", "## Other", "", "- [Architecture](architecture.md)", "- [Findings](findings.md)"] + \
+           (["- [Trading Networks usage](trading-networks.md)"] if tn else []) + [""] + [
+           
             "## All components", ""]
     idx += [f"- [`{n}`](services/{safe(n)}.md) - {nodes[n]['kind']}; {roles.get(n, '')}" for n in sorted(names)]
     write(os.path.join(a.out, "index.md"), "\n".join(idx))

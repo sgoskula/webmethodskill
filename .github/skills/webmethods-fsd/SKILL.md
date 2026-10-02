@@ -79,7 +79,7 @@ were saved, floating-point money, discarded trigger outputs, trigger retries tha
 `$default` meaning, `EXIT … FAILURE` inside a TRY that its own CATCH intercepts, unbounded
 `REPEAT COUNT=-1`). **Architecture observations** are
 automatic findings across services (shared tables, inconsistent logging or error handling,
-hard-coded endpoints, undeclared package dependencies, shared connections). Both are leads, not
+hard-coded endpoints, undeclared package dependencies, shared connections, Trading Networks use). Both are leads, not
 conclusions: confirm each one, then carry it into the FSD.
 
 ## Phase 2 — Plan
@@ -133,6 +133,7 @@ How to turn extract content into FSD content:
 | `outside scanned packages` | Dependency row + Open Question if behaviour matters |
 | `→ caught by the CATCH of TRY [x]` on an EXIT | Error-handling row: the exit never reaches the caller as written; document what the CATCH does instead (swallow, rethrow, own EXIT) and what the caller or trigger then sees |
 | `REPEAT` flagged "no upper bound" | Retry policy row: unbounded; Open Question for the intended maximum or timeout; Behaviour decision when migrating |
+| `Trading Networks calls` table, `Trading Networks (partner/document hub)` system | Integration catalog row per operation group (receive, route, deliver, partner profile, status, query, log) and a sequence diagram participant. State the literal document type, sender, receiver and status values mapped. Routing, partners and delivery come from TN processing rules, which are not in the packages: add `[TO CONFIRM: TN processing rule / partner profile for <doc type>]` |
 | Semantic flag | Fold the confirmed behaviour into the relevant table/step, and add a Notes bullet; if it looks like a defect, add an Open Question asking whether it is intended |
 | Service referenced by a trigger | Outputs table marks outputs "discarded"; Trigger section states the real retry behaviour |
 

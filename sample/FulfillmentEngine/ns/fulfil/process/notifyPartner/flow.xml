@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FLOW>
+  <INVOKE SERVICE="wm.tn.profile:getProfile">
+    <COMMENT>Look up the partner; its delivery method is configured in TN, not here.</COMMENT>
+    <MAP MODE="INPUT">
+      <MAPCOPY FROM="partnerId" TO="partnerID"/>
+    </MAP>
+    <MAP MODE="OUTPUT">
+      <MAPCOPY FROM="profile/corporationName" TO="partnerName"/>
+    </MAP>
+  </INVOKE>
+
+  <INVOKE SERVICE="wm.tn:receive">
+    <COMMENT>Hand the ship notice to TN; recognition picks the document type.</COMMENT>
+    <MAP MODE="INPUT">
+      <MAPCOPY FROM="shipNoticeXml" TO="bizdoc/content"/>
+      <MAPSET FIELD="DocumentType"><DATA><Values><value>ShipNotice</value></Values></DATA></MAPSET>
+      <MAPSET FIELD="SenderID"><DATA><Values><value>FULFIL-HUB</value></Values></DATA></MAPSET>
+      <MAPCOPY FROM="partnerId" TO="ReceiverID"/>
+      <MAPSET FIELD="apiPassword"><DATA><Values><value>do-not-copy-me</value></Values></DATA></MAPSET>
+    </MAP>
+    <MAP MODE="OUTPUT">
+      <MAPCOPY FROM="bizdoc/InternalID" TO="bizdocId"/>
+    </MAP>
+  </INVOKE>
+
+  <INVOKE SERVICE="wm.tn.doc:setUserStatus">
+    <MAP MODE="INPUT">
+      <MAPCOPY FROM="bizdocId" TO="InternalID"/>
+      <MAPSET FIELD="userStatus"><DATA><Values><value>SHIPNOTICE_SENT</value></Values></DATA></MAPSET>
+    </MAP>
+  </INVOKE>
+
+  <INVOKE SERVICE="wm.tn:route">
+    <MAP MODE="INPUT">
+      <MAPCOPY FROM="bizdocId" TO="bizdoc/InternalID"/>
+    </MAP>
+  </INVOKE>
+
+  <INVOKE SERVICE="wm.tn.out:deliver" DISABLED="true">
+    <COMMENT>Direct delivery, replaced by the processing rule that fires on route.</COMMENT>
+    <MAP MODE="INPUT">
+      <MAPCOPY FROM="bizdocId" TO="bizdoc/InternalID"/>
+    </MAP>
+  </INVOKE>
+
+  <MAP>
+    <MAPSET FIELD="delivered"><DATA><Values><value>true</value></Values></DATA></MAPSET>
+  </MAP>
+</FLOW>

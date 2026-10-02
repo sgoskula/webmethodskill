@@ -10,6 +10,9 @@ Automatic leads from the extractor: verify before relying on them.
 - REPEAT with `COUNT=-1` on FAILURE has no upper bound: if the body keeps failing the flow never gives up and never reaches its error handling. A re-implementation needs an explicit maximum or timeout, so ask what it should be
 - BRANCH on `httpStatus` has no `$default`: values matching no case skip the branch silently
 
+### [`fulfil.process:notifyPartner`](services/fulfil.process__notifyPartner.md)
+- `partnerName` is set but never used afterwards (not read later, not a declared output). Either it is dead logic or a step is missing
+
 ### [`fulfil.process:orchestrateFulfillment`](services/fulfil.process__orchestrateFulfillment.md)
 - BRANCH on `orderStatus` has no `$default`: values matching no case skip the branch silently
 - `EXIT $flow FAILURE` ("Stock allocation failed") sits inside TRY [allocation], so it is caught by that TRY's CATCH and does not reach the caller as written. What the caller sees depends on what the CATCH does (swallow, rethrow, or its own EXIT)
@@ -46,8 +49,9 @@ Automatic leads from the extractor: verify before relying on them.
 
 - Package `FulfillmentEngine` calls `OrderProcessing` (1 call(s)) but doesn't declare it in manifest.v3 `requires`, so load order isn't guaranteed
 - Table `ORDERS` is shared by 4 capabilities (`fulfil.process:orchestrateFulfillment` SELECT; `order.api.orders:_get` SELECT; `order.process:cancelOrder` UPDATE; `order.process:submitOrder` INSERT). Document its lifecycle across capabilities and check how they interact (ordering, status assumptions, concurrency)
-- Logging is inconsistent: `fulfil.process:orchestrateFulfillment` logs, `order.api.orders:_get` logs, `order.process:cancelOrder` logs, `order.process:submitOrder` has no logging
-- Error handling is inconsistent: `fulfil.process:orchestrateFulfillment` uses TRY/CATCH, `order.api.orders:_get` has no TRY/CATCH, `order.process:cancelOrder` has no TRY/CATCH, `order.process:submitOrder` uses TRY/CATCH
+- Trading Networks is used by `fulfil.process:notifyPartner`. Partner profiles, document types, processing rules and delivery settings live in TN, not in these packages, so the real routing and delivery behaviour cannot be read from the code [TO CONFIRM: export of the TN processing rules, partner profiles and document types]
+- Logging is inconsistent: `fulfil.process:notifyPartner` has no logging, `fulfil.process:orchestrateFulfillment` logs, `order.api.orders:_get` logs, `order.process:cancelOrder` logs, `order.process:submitOrder` has no logging
+- Error handling is inconsistent: `fulfil.process:notifyPartner` has no TRY/CATCH, `fulfil.process:orchestrateFulfillment` uses TRY/CATCH, `order.api.orders:_get` has no TRY/CATCH, `order.process:cancelOrder` has no TRY/CATCH, `order.process:submitOrder` uses TRY/CATCH
 - Hard-coded URL `http://wms.internal/stock/reserve` in `fulfil.process:allocateStock` instead of an endpoint alias or configuration value
 - Hard-coded URL `https://carrier.example/api/book` in `fulfil.process:orchestrateFulfillment` instead of an endpoint alias or configuration value
 - Hard-coded URL `https://payments.internal/charge` in `order.process:submitOrder` instead of an endpoint alias or configuration value

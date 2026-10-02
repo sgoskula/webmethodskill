@@ -14,3 +14,4 @@ declared dependency, BRANCH with no `$default`, LOOP containing nested BRANCH/SE
 `%var%` substitution, and a hard-coded URL.
 `fulfil.util:computeShipping` has nested BRANCHes with `$null`, label expressions and `$default`.
 `fulfil.process:allocateStock` has an unbounded `REPEAT COUNT="-1"` and a status BRANCH without `$default`.
+`fulfil.process:notifyPartner` calls illustrative Trading Networks services (`wm.tn:receive`, `wm.tn:route`, `wm.tn.profile:getProfile`, `wm.tn.doc:setUserStatus`, a disabled `wm.tn.out:deliver`) with a literal document type and a secret-named input, to exercise the TN grouping and redaction.
