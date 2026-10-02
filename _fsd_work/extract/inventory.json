@@ -1,0 +1,65 @@
+{
+  "packages": [
+    {
+      "package": "OrderProcessing",
+      "requires": [
+        "WmPublic"
+      ],
+      "startup": [],
+      "shutdown": [],
+      "version": "1.0"
+    }
+  ],
+  "nodes": {
+    "order.triggers:orderTrigger": {
+      "kind": "Trigger",
+      "invokes": [],
+      "invoked_by": []
+    },
+    "order.docs:OrderDoc": {
+      "kind": "Document type",
+      "invokes": [],
+      "invoked_by": []
+    },
+    "order.jdbc:insertOrder": {
+      "kind": "jdbc service",
+      "invokes": [],
+      "invoked_by": [
+        "order.process:submitOrder"
+      ]
+    },
+    "order.process:validateOrder": {
+      "kind": "Java service",
+      "invokes": [],
+      "invoked_by": [
+        "order.process:submitOrder"
+      ]
+    },
+    "order.process:submitOrder": {
+      "kind": "Flow service",
+      "invokes": [
+        "order.jdbc:insertOrder",
+        "order.process:validateOrder",
+        "pub.client:http",
+        "pub.flow:getLastError",
+        "pub.math:multiplyFloats"
+      ],
+      "invoked_by": []
+    }
+  },
+  "entry_points": [
+    "order.process:submitOrder"
+  ],
+  "triggered": [
+    "order.process:submitOrder"
+  ],
+  "integrations": {
+    "Adapter service (jdbc)": [
+      "order.jdbc:insertOrder"
+    ],
+    "HTTP/REST call": [
+      "order.process:submitOrder"
+    ]
+  },
+  "external_calls": {}
+}

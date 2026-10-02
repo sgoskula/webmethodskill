@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Values>
+  <value name="node_type">trigger</value>
+  <value name="node_comment">Subscribes to new OrderDoc publications from the storefront and invokes order submission.</value>
+  <value name="service">order.process:submitOrder</value>
+  <value name="documentType">order.docs:OrderDoc</value>
+  <value name="filterCondition">status == 'NEW'</value>
+  <value name="joinType">NONE</value>
+  <value name="concurrency">serial</value>
+  <value name="maxRetries">3</value>
+  <value name="retryInterval">5</value>
+</Values>

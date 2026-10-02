@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Values>
+  <value name="node_type">recordDef</value>
+  <value name="node_comment">Canonical order document published by the storefront and consumed by order submission.</value>
+  <array name="rec_fields">
+    <record>
+      <value name="field_name">orderId</value>
+      <value name="field_type">string</value>
+      <value name="field_dim">0</value>
+      <value name="node_comment">Unique order identifier generated upstream by the storefront.</value>
+    </record>
+    <record>
+      <value name="field_name">customerId</value>
+      <value name="field_type">string</value>
+      <value name="field_dim">0</value>
+    </record>
+    <record>
+      <value name="field_name">amount</value>
+      <value name="field_type">string</value>
+      <value name="field_dim">0</value>
+      <value name="node_comment">Order total in USD, represented as a decimal string.</value>
+    </record>
+    <record>
+      <value name="field_name">status</value>
+      <value name="field_type">string</value>
+      <value name="field_dim">0</value>
+      <value name="field_opt">true</value>
+    </record>
+    <record>
+      <value name="field_name">lines</value>
+      <value name="field_type">record</value>
+      <value name="field_dim">1</value>
+      <value name="node_comment">Order line items.</value>
+      <array name="rec_fields">
+        <record>
+          <value name="field_name">sku</value>
+          <value name="field_type">string</value>
+          <value name="field_dim">0</value>
+        </record>
+        <record>
+          <value name="field_name">qty</value>
+          <value name="field_type">string</value>
+          <value name="field_dim">0</value>
+        </record>
+        <record>
+          <value name="field_name">price</value>
+          <value name="field_type">string</value>
+          <value name="field_dim">0</value>
+        </record>
+      </array>
+    </record>
+  </array>
+</Values>

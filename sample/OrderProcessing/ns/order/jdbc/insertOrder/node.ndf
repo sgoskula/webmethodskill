@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Values>
+  <value name="node_type">adapterService</value>
+  <value name="svc_type">jdbc</value>
+  <value name="node_comment">JDBC adapter service that inserts a new order row into the ORDERS table.</value>
+  <value name="connectionName">OrderDB_Conn</value>
+  <value name="operationType">INSERT</value>
+  <value name="tableName">ORDERS</value>
+  <value name="sqlStatement">INSERT INTO ORDERS (ORDER_ID, CUSTOMER_ID, AMOUNT, STATUS) VALUES (?, ?, ?, ?)</value>
+  <value name="password">placeholder-do-not-use</value>
+  <record name="svc_sig">
+    <record name="sig_in">
+      <array name="rec_fields">
+        <record>
+          <value name="field_name">orderRecord</value>
+          <value name="field_type">record</value>
+          <value name="field_dim">0</value>
+        </record>
+      </array>
+    </record>
+    <record name="sig_out">
+      <array name="rec_fields">
+        <record>
+          <value name="field_name">rowsInserted</value>
+          <value name="field_type">string</value>
+          <value name="field_dim">0</value>
+        </record>
+      </array>
+    </record>
+  </record>
+</Values>

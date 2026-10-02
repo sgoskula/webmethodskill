@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Values>
+  <value name="version">1.0</value>
+  <record name="requires">
+    <value name="WmPublic">true</value>
+  </record>
+  <record name="startup_services">
+  </record>
+  <record name="shutdown_services">
+  </record>
+</Values>

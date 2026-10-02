@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FLOW>
+  <MAP>
+    <COMMENT>Seed working pipeline variables from the incoming order document.</COMMENT>
+    <MAPCOPY FROM="order/orderId" TO="orderId"/>
+    <MAPCOPY FROM="order/customerId" TO="customerId"/>
+    <MAPCOPY FROM="order/amount" TO="amount"/>
+    <MAPSET FIELD="status"><DATA><Values><value>PENDING</value></Values></DATA></MAPSET>
+  </MAP>
+
+  <BRANCH SWITCH="amount" LABELEXPRESSIONS="true">
+    <COMMENT>High value orders require manager approval before fulfillment.</COMMENT>
+    <SEQUENCE NAME="%amount% &gt; 1000">
+      <MAP>
+        <MAPSET FIELD="status"><DATA><Values><value>PENDING_APPROVAL</value></Values></DATA></MAPSET>
+      </MAP>
+      <EXIT FROM="$flow" SIGNAL="SUCCESS"/>
+    </SEQUENCE>
+    <SEQUENCE NAME="$default"/>
+  </BRANCH>
+
+  <SEQUENCE FORM="TRY">
+    <COMMENT>Validate the order and persist it; any failure is handled in the CATCH block below.</COMMENT>
+    <INVOKE SERVICE="order.process:validateOrder">
+      <MAP MODE="INPUT">
+        <MAPCOPY FROM="order" TO="order"/>
+      </MAP>
+    </INVOKE>
+
+    <LOOP IN-ARRAY="order/lines" OUT-ARRAY="lineAmounts">
+      <MAP>
+        <COMMENT>Compute the extended amount for each line (qty * price).</COMMENT>
+        <MAPINVOKE SERVICE="pub.math:multiplyFloats">
+          <MAP MODE="INPUT">
+            <MAPCOPY FROM="lines/qty" TO="value1"/>
+            <MAPCOPY FROM="lines/price" TO="value2"/>
+          </MAP>
+          <MAP MODE="OUTPUT">
+            <MAPCOPY FROM="result" TO="lineAmount"/>
+          </MAP>
+        </MAPINVOKE>
+      </MAP>
+    </LOOP>
+
+    <INVOKE SERVICE="order.jdbc:insertOrder">
+      <MAP MODE="INPUT">
+        <MAPCOPY FROM="orderId" TO="orderRecord/orderId"/>
+        <MAPCOPY FROM="customerId" TO="orderRecord/customerId"/>
+        <MAPCOPY FROM="amount" TO="orderRecord/amount"/>
+        <MAPCOPY FROM="status" TO="orderRecord/status"/>
+      </MAP>
+    </INVOKE>
+  </SEQUENCE>
+
+  <SEQUENCE FORM="CATCH">
+    <COMMENT>Persistence or validation failed: log the error, mark the order failed and abort the flow.</COMMENT>
+    <INVOKE SERVICE="pub.flow:getLastError">
+      <MAP MODE="OUTPUT">
+        <MAPCOPY FROM="lastError" TO="lastError"/>
+      </MAP>
+    </INVOKE>
+    <MAP>
+      <MAPSET FIELD="status"><DATA><Values><value>FAILED</value></Values></DATA></MAPSET>
+    </MAP>
+    <EXIT FROM="$flow" SIGNAL="FAILURE" FAILURE-MESSAGE="Order could not be validated or persisted"/>
+  </SEQUENCE>
+
+  <REPEAT COUNT="3" BACK-OFF="5" LOOP-ON="FAILURE">
+    <COMMENT>Charge the payment gateway; retry up to 3 times with a 5s back-off on failure.</COMMENT>
+    <INVOKE SERVICE="pub.client:http">
+      <MAP MODE="INPUT">
+        <MAPSET FIELD="url"><DATA><Values><value>https://payments.internal/charge</value></Values></DATA></MAPSET>
+        <MAPCOPY FROM="orderId" TO="data/orderId"/>
+        <MAPCOPY FROM="amount" TO="data/amount"/>
+      </MAP>
+    </INVOKE>
+  </REPEAT>
+
+  <MAP>
+    <MAPSET FIELD="status"><DATA><Values><value>CONFIRMED</value></Values></DATA></MAPSET>
+    <MAPSET FIELD="confirmationNumber" VARIABLES="true"><DATA><Values><value>%orderId%-CONF</value></Values></DATA></MAPSET>
+  </MAP>
+
+  <EXIT FROM="$flow" SIGNAL="SUCCESS"/>
+</FLOW>

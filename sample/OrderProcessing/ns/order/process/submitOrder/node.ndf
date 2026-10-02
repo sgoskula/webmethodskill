@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Values>
+  <value name="node_type">service</value>
+  <value name="svc_type">flow</value>
+  <value name="node_comment">Validates, persists and confirms a customer order. Triggered by orderTrigger when a new OrderDoc is published.</value>
+  <record name="svc_sig">
+    <record name="sig_in">
+      <array name="rec_fields">
+        <record>
+          <value name="field_name">order</value>
+          <value name="field_type">record</value>
+          <value name="field_dim">0</value>
+          <value name="rec_ref">order.docs:OrderDoc</value>
+        </record>
+      </array>
+    </record>
+    <record name="sig_out">
+      <array name="rec_fields">
+        <record>
+          <value name="field_name">orderId</value>
+          <value name="field_type">string</value>
+          <value name="field_dim">0</value>
+        </record>
+        <record>
+          <value name="field_name">status</value>
+          <value name="field_type">string</value>
+          <value name="field_dim">0</value>
+        </record>
+        <record>
+          <value name="field_name">confirmationNumber</value>
+          <value name="field_type">string</value>
+          <value name="field_dim">0</value>
+          <value name="field_opt">true</value>
+        </record>
+      </array>
+    </record>
+  </record>
+</Values>
