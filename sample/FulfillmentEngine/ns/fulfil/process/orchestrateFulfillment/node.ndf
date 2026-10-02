@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Values>
+  <value name="node_type">service</value>
+  <value name="svc_type">flow</value>
+  <value name="node_comment">Orchestrates fulfilment: stock allocation per item, shipping cost, carrier booking with retry, notification. Triggered by fulfilTrigger.</value>
+  <record name="svc_sig">
+    <record name="sig_in"><array name="rec_fields"><record><value name="field_name">doc</value><value name="field_type">record</value><value name="field_dim">0</value><value name="rec_ref">fulfil.docs:FulfilDoc</value></record></array></record>
+    <record name="sig_out"><array name="rec_fields"><record><value name="field_name">fulfilStatus</value><value name="field_type">string</value><value name="field_dim">0</value></record><record><value name="field_name">trackingNumber</value><value name="field_type">string</value><value name="field_dim">0</value></record></array></record>
+  </record>
+</Values>

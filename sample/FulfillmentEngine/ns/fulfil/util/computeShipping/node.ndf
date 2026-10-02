@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Values>
+  <value name="node_type">service</value>
+  <value name="svc_type">flow</value>
+  <value name="node_comment">Computes shipping cost from region, weight and priority.</value>
+  <record name="svc_sig">
+    <record name="sig_in"><array name="rec_fields"><record><value name="field_name">region</value><value name="field_type">string</value><value name="field_dim">0</value></record><record><value name="field_name">weightKg</value><value name="field_type">string</value><value name="field_dim">0</value></record><record><value name="field_name">priority</value><value name="field_type">string</value><value name="field_dim">0</value></record></array></record>
+    <record name="sig_out"><array name="rec_fields"><record><value name="field_name">shippingCost</value><value name="field_type">string</value><value name="field_dim">0</value></record><record><value name="field_name">carrier</value><value name="field_type">string</value><value name="field_dim">0</value></record></array></record>
+  </record>
+</Values>

@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FLOW>
+  <MAP>
+    <COMMENT>Seed pipeline from the FulfilDoc.</COMMENT>
+    <MAPCOPY FROM="doc/orderId" TO="orderId"/>
+    <MAPCOPY FROM="doc/region" TO="region"/>
+    <MAPCOPY FROM="doc/weightKg" TO="weightKg"/>
+    <MAPCOPY FROM="doc/priority" TO="priority"/>
+    <MAPSET FIELD="fulfilStatus"><DATA><Values><value>RECEIVED</value></Values></DATA></MAPSET>
+  </MAP>
+
+  <INVOKE SERVICE="order.jdbc:selectOrder">
+    <COMMENT>Cross-package call into OrderProcessing (not declared in manifest requires).</COMMENT>
+    <MAP MODE="INPUT">
+      <MAPCOPY FROM="orderId" TO="orderId"/>
+    </MAP>
+    <MAP MODE="OUTPUT">
+      <MAPCOPY FROM="orderRecord/status" TO="orderStatus"/>
+    </MAP>
+  </INVOKE>
+
+  <BRANCH SWITCH="orderStatus">
+    <COMMENT>Only confirmed orders are fulfilled; no $default, so any other status silently continues.</COMMENT>
+    <SEQUENCE NAME="CANCELLED">
+      <INVOKE SERVICE="common.util:logEvent">
+        <MAP MODE="INPUT">
+          <MAPSET FIELD="eventType"><DATA><Values><value>FULFIL_SKIPPED</value></Values></DATA></MAPSET>
+          <MAPCOPY FROM="orderId" TO="orderId"/>
+        </MAP>
+      </INVOKE>
+      <EXIT FROM="$flow" SIGNAL="SUCCESS"/>
+    </SEQUENCE>
+    <SEQUENCE NAME="PENDING_APPROVAL">
+      <EXIT FROM="$flow" SIGNAL="FAILURE" FAILURE-MESSAGE="Order still awaiting approval"/>
+    </SEQUENCE>
+  </BRANCH>
+
+  <SEQUENCE FORM="TRY" NAME="allocation">
+    <COMMENT>Allocate stock for every line item; any hazmat item diverts to special handling.</COMMENT>
+    <LOOP IN-ARRAY="doc/items" OUT-ARRAY="allocations">
+      <SEQUENCE NAME="perItem">
+        <BRANCH SWITCH="doc/items/hazmat">
+          <SEQUENCE NAME="Y">
+            <INVOKE SERVICE="common.util:logEvent">
+              <MAP MODE="INPUT">
+                <MAPSET FIELD="eventType"><DATA><Values><value>HAZMAT_ITEM</value></Values></DATA></MAPSET>
+                <MAPCOPY FROM="doc/items/sku" TO="message"/>
+              </MAP>
+            </INVOKE>
+            <MAP>
+              <MAPSET FIELD="needsSpecialCarrier"><DATA><Values><value>true</value></Values></DATA></MAPSET>
+            </MAP>
+            <EXIT FROM="$loop" SIGNAL="SUCCESS"/>
+          </SEQUENCE>
+          <SEQUENCE NAME="$default">
+            <INVOKE SERVICE="fulfil.process:allocateStock">
+              <MAP MODE="INPUT">
+                <MAPCOPY FROM="doc/items/sku" TO="sku"/>
+                <MAPCOPY FROM="doc/items/qty" TO="qty"/>
+              </MAP>
+              <MAP MODE="OUTPUT">
+                <MAPCOPY FROM="allocated" TO="allocations/allocated"/>
+                <MAPCOPY FROM="allocated" TO="lastAllocated"/>
+              </MAP>
+            </INVOKE>
+            <BRANCH SWITCH="lastAllocated">
+              <SEQUENCE NAME="false">
+                <MAP>
+                  <MAPSET FIELD="fulfilStatus"><DATA><Values><value>BACKORDER</value></Values></DATA></MAPSET>
+                </MAP>
+                <EXIT FROM="$flow" SIGNAL="FAILURE" FAILURE-MESSAGE="Stock allocation failed"/>
+              </SEQUENCE>
+            </BRANCH>
+          </SEQUENCE>
+        </BRANCH>
+      </SEQUENCE>
+    </LOOP>
+  </SEQUENCE>
+  <SEQUENCE FORM="CATCH">
+    <INVOKE SERVICE="pub.flow:getLastError">
+      <MAP MODE="OUTPUT">
+        <MAPCOPY FROM="lastError" TO="allocError"/>
+      </MAP>
+    </INVOKE>
+    <INVOKE SERVICE="pub.flow:throwExceptionForRetry">
+      <COMMENT>Rethrown as ISRuntimeException so the trigger redelivers the document.</COMMENT>
+      <MAP MODE="INPUT">
+        <MAPSET FIELD="message"><DATA><Values><value>Allocation failed, retrying</value></Values></DATA></MAPSET>
+      </MAP>
+    </INVOKE>
+  </SEQUENCE>
+
+  <INVOKE SERVICE="fulfil.util:computeShipping">
+    <MAP MODE="INPUT">
+      <MAPCOPY FROM="region" TO="region"/>
+      <MAPCOPY FROM="weightKg" TO="weightKg"/>
+      <MAPCOPY FROM="priority" TO="priority"/>
+    </MAP>
+    <MAP MODE="OUTPUT">
+      <MAPCOPY FROM="shippingCost" TO="shippingCost"/>
+      <MAPCOPY FROM="carrier" TO="carrier"/>
+    </MAP>
+  </INVOKE>
+
+  <BRANCH SWITCH="needsSpecialCarrier">
+    <SEQUENCE NAME="true">
+      <MAP>
+        <MAPSET FIELD="carrier"><DATA><Values><value>HAZMAT-LOGISTICS</value></Values></DATA></MAPSET>
+      </MAP>
+    </SEQUENCE>
+  </BRANCH>
+
+  <SEQUENCE FORM="TRY" NAME="booking">
+    <REPEAT COUNT="2" BACK-OFF="10" LOOP-ON="FAILURE">
+      <COMMENT>Book the carrier; retry twice on exception.</COMMENT>
+      <SEQUENCE NAME="bookOnce" EXIT-ON="FAILURE">
+        <INVOKE SERVICE="pub.client:http">
+          <MAP MODE="INPUT">
+            <MAPSET FIELD="url"><DATA><Values><value>https://carrier.example/api/book</value></Values></DATA></MAPSET>
+            <MAPCOPY FROM="orderId" TO="data/orderId"/>
+            <MAPCOPY FROM="carrier" TO="data/carrier"/>
+          </MAP>
+          <MAP MODE="OUTPUT">
+            <MAPCOPY FROM="header/status" TO="bookingStatus"/>
+            <MAPCOPY FROM="trackingId" TO="trackingNumber"/>
+          </MAP>
+        </INVOKE>
+        <BRANCH SWITCH="bookingStatus">
+          <SEQUENCE NAME="503">
+            <EXIT FROM="bookOnce" SIGNAL="FAILURE" FAILURE-MESSAGE="Carrier unavailable"/>
+          </SEQUENCE>
+          <SEQUENCE NAME="$default"/>
+        </BRANCH>
+      </SEQUENCE>
+    </REPEAT>
+    <INVOKE SERVICE="pub.publish:publish" DISABLED="true">
+      <COMMENT>Legacy notification, replaced by the email step below.</COMMENT>
+      <MAP MODE="INPUT">
+        <MAPSET FIELD="documentTypeName"><DATA><Values><value>fulfil.docs:ShipNotice</value></Values></DATA></MAPSET>
+      </MAP>
+    </INVOKE>
+  </SEQUENCE>
+  <SEQUENCE FORM="CATCH">
+    <MAP>
+      <MAPSET FIELD="fulfilStatus"><DATA><Values><value>BOOKING_FAILED</value></Values></DATA></MAPSET>
+    </MAP>
+    <EXIT FROM="$flow" SIGNAL="FAILURE" FAILURE-MESSAGE="Carrier booking failed"/>
+  </SEQUENCE>
+
+  <MAP>
+    <MAPSET FIELD="fulfilStatus"><DATA><Values><value>SHIPPED</value></Values></DATA></MAPSET>
+    <MAPSET FIELD="body" VARIABLES="true"><DATA><Values><value>Order %orderId% shipped via %carrier%, tracking %trackingNumber%, cost %shippingCost%</value></Values></DATA></MAPSET>
+  </MAP>
+
+  <INVOKE SERVICE="pub.client:smtp">
+    <MAP MODE="INPUT">
+      <MAPSET FIELD="to"><DATA><Values><value>ops@example.com</value></Values></DATA></MAPSET>
+      <MAPCOPY FROM="body" TO="body"/>
+    </MAP>
+  </INVOKE>
+</FLOW>

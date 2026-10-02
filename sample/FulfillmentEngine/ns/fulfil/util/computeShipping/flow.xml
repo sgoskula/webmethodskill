@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FLOW>
+  <BRANCH SWITCH="region">
+    <COMMENT>Carrier and base rate depend on region; unknown regions are quoted manually.</COMMENT>
+    <SEQUENCE NAME="EU">
+      <MAP>
+        <MAPSET FIELD="carrier"><DATA><Values><value>DHL</value></Values></DATA></MAPSET>
+        <MAPSET FIELD="shippingCost"><DATA><Values><value>12.50</value></Values></DATA></MAPSET>
+      </MAP>
+      <BRANCH SWITCH="priority">
+        <COMMENT>Express upgrade within EU.</COMMENT>
+        <SEQUENCE NAME="EXPRESS">
+          <MAP>
+            <MAPSET FIELD="shippingCost"><DATA><Values><value>29.90</value></Values></DATA></MAPSET>
+          </MAP>
+        </SEQUENCE>
+        <SEQUENCE NAME="$null">
+          <MAP>
+            <COMMENT>Priority missing: treated as standard, rate unchanged.</COMMENT>
+            <MAPSET FIELD="priority"><DATA><Values><value>STANDARD</value></Values></DATA></MAPSET>
+          </MAP>
+        </SEQUENCE>
+      </BRANCH>
+    </SEQUENCE>
+    <SEQUENCE NAME="US">
+      <MAP>
+        <MAPSET FIELD="carrier"><DATA><Values><value>FEDEX</value></Values></DATA></MAPSET>
+      </MAP>
+      <BRANCH SWITCH="weightKg" LABELEXPRESSIONS="true">
+        <SEQUENCE NAME="%weightKg% &gt; 30">
+          <MAP>
+            <MAPSET FIELD="shippingCost"><DATA><Values><value>85.00</value></Values></DATA></MAPSET>
+          </MAP>
+        </SEQUENCE>
+        <SEQUENCE NAME="%weightKg% &gt; 10">
+          <MAP>
+            <MAPSET FIELD="shippingCost"><DATA><Values><value>40.00</value></Values></DATA></MAPSET>
+          </MAP>
+        </SEQUENCE>
+        <SEQUENCE NAME="$default">
+          <MAP>
+            <MAPSET FIELD="shippingCost"><DATA><Values><value>18.00</value></Values></DATA></MAPSET>
+          </MAP>
+        </SEQUENCE>
+      </BRANCH>
+    </SEQUENCE>
+    <SEQUENCE NAME="$default">
+      <MAP>
+        <MAPSET FIELD="carrier"><DATA><Values><value>MANUAL</value></Values></DATA></MAPSET>
+        <MAPSET FIELD="shippingCost"><DATA><Values><value>0</value></Values></DATA></MAPSET>
+      </MAP>
+    </SEQUENCE>
+  </BRANCH>
+</FLOW>

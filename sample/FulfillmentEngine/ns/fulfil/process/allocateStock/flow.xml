@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FLOW>
+  <MAP>
+    <MAPSET FIELD="allocated"><DATA><Values><value>false</value></Values></DATA></MAPSET>
+  </MAP>
+  <REPEAT COUNT="-1" BACK-OFF="2" LOOP-ON="FAILURE">
+    <COMMENT>Poll the warehouse service until it answers without an exception (no upper bound).</COMMENT>
+    <INVOKE SERVICE="pub.client:http">
+      <MAP MODE="INPUT">
+        <MAPSET FIELD="url"><DATA><Values><value>http://wms.internal/stock/reserve</value></Values></DATA></MAPSET>
+        <MAPCOPY FROM="sku" TO="data/sku"/>
+        <MAPCOPY FROM="qty" TO="data/qty"/>
+      </MAP>
+      <MAP MODE="OUTPUT">
+        <MAPCOPY FROM="header/status" TO="httpStatus"/>
+        <MAPCOPY FROM="warehouseCode" TO="warehouse"/>
+      </MAP>
+    </INVOKE>
+  </REPEAT>
+  <BRANCH SWITCH="httpStatus">
+    <SEQUENCE NAME="200">
+      <MAP><MAPSET FIELD="allocated"><DATA><Values><value>true</value></Values></DATA></MAPSET></MAP>
+    </SEQUENCE>
+    <SEQUENCE NAME="409">
+      <COMMENT>Out of stock: allocated stays false.</COMMENT>
+    </SEQUENCE>
+  </BRANCH>
+</FLOW>
