@@ -272,6 +272,13 @@ class WikiTest(unittest.TestCase):
         out = self.ask("--sources", "which orders are retried by the trigger")
         self.assertIn("findings order.triggers", out)
 
+    def test_ask_includes_invoking_trigger_settings(self):
+        out = self.ask("What happens if stock allocation fails for an item in a fulfilment?")
+        self.assertRegex(out, r"`maxRetries` \| 3")
+        self.assertIn("fulfil.triggers:fulfilTrigger - Raw properties", out)
+        out = self.ask("--sources", "what does cancelOrder do")
+        self.assertIn("order.triggers:cancelTrigger - Raw properties", out)
+
     def test_ask_prompt_has_grounding_rules(self):
         out = self.ask("What does submitOrder do?")
         self.assertIn("ONLY the context below", out)

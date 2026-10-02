@@ -105,6 +105,14 @@ def select(index, question, top_k, max_chars, forced=()):
         for i, c in enumerate(index.chunks):
             if c["service"] == s and body(c):
                 take(i)
+    for s in hit_services[:3]:  # triggers that invoke them: retry, concurrency and join settings change the answer
+        for i, c in enumerate(index.chunks):
+            if c["service"] != s and c["title"].endswith("Raw properties (secrets redacted)") \
+                    and re.search(r"\| `service` \| " + re.escape(s) + r" \|", c["text"]):
+                take(i)
+                for j, d in enumerate(index.chunks):
+                    if d["service"] == c["service"] and d["title"].split(" - ")[-1].startswith("Semantic"):
+                        take(j)
     for s in hit_services[:3]:
         for callee in neighbours(s, index.chunks):
             for i, c in enumerate(index.chunks):
