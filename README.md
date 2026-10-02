@@ -19,8 +19,14 @@ Raw `flow.xml` is huge and easy to misread. Extracting first means no `BRANCH` c
 ```
 .github/
 ├── agents/
-│   └── wm-fsd.agent.md                  # optional agent persona ("wm-fsd")
+│   ├── wm-fsd.agent.md                  # optional agent persona ("wm-fsd")
+│   └── wm-ask.agent.md                  # optional agent persona for wiki Q&A ("wm-ask")
 └── skills/
+    ├── webmethods-wiki/                 # second skill: wiki + "ask questions about the functionality"
+    │   ├── SKILL.md
+    │   └── scripts/
+    │       ├── wm_wiki.py               # builds _wiki/ (linked pages, search index, llm_context.md)
+    │       └── wm_ask.py                # retrieves the relevant facts and prints a grounded LLM prompt
     └── webmethods-fsd/
         ├── SKILL.md                     # the workflow the model follows
         ├── scripts/
@@ -36,6 +42,23 @@ sample/FulfillmentEngine/                 #   complex-flow stress sample (not in
 tests/test_wm_fsd.py                     # tests for the extractor, lint and sample FSD
 docs/FSD.md                              # FSD generated from the sample package
 ```
+
+## Wiki and questions (`webmethods-wiki` skill)
+
+Besides the FSD, you can build a cross-linked wiki of the application and ask questions about its functionality:
+
+> Build a wiki for `MyPackage`, then tell me what happens when a payment is declined.
+
+```
+python .github/skills/webmethods-fsd/scripts/wm_extract.py --out _fsd_work/extract <pkgDir>...
+python .github/skills/webmethods-wiki/scripts/wm_wiki.py --extract _fsd_work/extract --out _wiki
+python .github/skills/webmethods-wiki/scripts/wm_ask.py --wiki _wiki "What happens when carrier booking returns 503?"
+```
+
+`_wiki/` holds linked pages per capability, service and table, `findings.md`, and `llm_context.md` (the whole
+application in one file, no diagrams) to attach to any LLM. `wm_ask.py` ranks the relevant facts, adds the matching
+services' own logic and their callees', and prints a prompt that tells the LLM to answer only from them, cite sources
+and say "Not in the extracted facts" when it can't. Retrieval is local (BM25, no network, no packages).
 
 ## Requirements
 

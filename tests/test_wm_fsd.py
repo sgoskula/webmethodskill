@@ -204,6 +204,86 @@ class ComplexFlowTest(unittest.TestCase):
                 self.assertEqual(check_mermaid.lint_block(b)[1], [], name)
 
 
+WIKI_SCRIPTS = os.path.join(ROOT, ".github", "skills", "webmethods-wiki", "scripts")
+
+
+class WikiTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        pkgs = [os.path.join(ROOT, "sample", p) for p in ("OrderProcessing", "CommonUtils", "FulfillmentEngine")]
+        cls.extract = os.path.join(cls.tmp.name, "extract")
+        cls.wiki = os.path.join(cls.tmp.name, "wiki")
+        subprocess.run([sys.executable, os.path.join(SCRIPTS, "wm_extract.py"), "--out", cls.extract, *pkgs],
+                       check=True, capture_output=True)
+        subprocess.run([sys.executable, os.path.join(WIKI_SCRIPTS, "wm_wiki.py"), "--extract", cls.extract,
+                        "--out", cls.wiki], check=True, capture_output=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def read(self, rel):
+        with open(os.path.join(self.wiki, rel)) as f:
+            return f.read()
+
+    def ask(self, *args):
+        return subprocess.run([sys.executable, os.path.join(WIKI_SCRIPTS, "wm_ask.py"), "--wiki", self.wiki, *args],
+                              check=True, capture_output=True, text=True).stdout
+
+    def test_pages_written_and_linked(self):
+        for rel in ("index.md", "architecture.md", "findings.md", "llm_context.md", "chunks.jsonl",
+                    "tables/ORDERS.md", "capabilities/fulfil.process__orchestrateFulfillment.md",
+                    "services/order.process__cancelOrder.md"):
+            self.assertTrue(os.path.isfile(os.path.join(self.wiki, rel)), rel)
+        self.assertIn("(services/order.process__submitOrder.md)", self.read("index.md"))
+        self.assertIn("(order.jdbc__updateOrderStatus.md)", self.read("services/order.process__cancelOrder.md"))
+        self.assertIn("```mermaid", self.read("services/order.process__submitOrder.md"))
+        self.assertIn("INSERT", self.read("tables/ORDERS.md"))
+
+    def test_links_resolve(self):
+        for dirpath, _, files in os.walk(self.wiki):
+            for fn in files:
+                if not fn.endswith(".md"):
+                    continue
+                with open(os.path.join(dirpath, fn)) as fh:
+                    text = fh.read()
+                for target in re.findall(r"\]\(([^)#]+\.md)\)", text):
+                    self.assertTrue(os.path.isfile(os.path.normpath(os.path.join(dirpath, target))),
+                                    f"{fn} -> {target}")
+
+    def test_llm_context_has_no_diagrams_or_secrets(self):
+        ctx = self.read("llm_context.md")
+        self.assertNotIn("```mermaid", ctx)
+        self.assertNotIn("placeholder-do-not-use", ctx)
+        self.assertIn("BRANCH on rowsUpdated", ctx)
+
+    def test_ask_finds_the_right_logic(self):
+        out = self.ask("--sources", "What happens when a cancel arrives for a CONFIRMED order?")
+        self.assertIn("order.process:cancelOrder - Logic", out)
+        out = self.ask("--sources", "How is shipping cost calculated for US orders over 30 kg?")
+        self.assertIn("fulfil.util:computeShipping - Logic", out)
+        out = self.ask("--sources", "What if carrier booking fails with 503?")
+        self.assertIn("fulfil.process:orchestrateFulfillment - Logic", out)
+
+    def test_ask_pulls_in_callee_logic_and_findings(self):
+        out = self.ask("--sources", "what does cancelOrder do")
+        self.assertIn("common.util:logEvent - Logic", out)
+        out = self.ask("--sources", "which orders are retried by the trigger")
+        self.assertIn("findings order.triggers", out)
+
+    def test_ask_prompt_has_grounding_rules(self):
+        out = self.ask("What does submitOrder do?")
+        self.assertIn("ONLY the context below", out)
+        self.assertIn("Not in the extracted facts", out)
+        self.assertIn("=== QUESTION ===\nWhat does submitOrder do?", out)
+
+    def test_ask_respects_budget_and_forced_service(self):
+        out = self.ask("--max-chars", "3000", "--service", "common.util:logEvent", "anything")
+        self.assertIn("common.util:logEvent", out)
+        self.assertLess(len(out), 9000)
+
+
 class LargeApplicationTest(unittest.TestCase):
     def test_component_diagram_falls_back_to_folder_level(self):
         with tempfile.TemporaryDirectory() as out, \
