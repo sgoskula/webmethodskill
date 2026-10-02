@@ -17,3 +17,6 @@
 | `concurrency` | serial |
 | `maxRetries` | 3 |
 | `retryInterval` | 5 |
+
+## Semantic flags (verify, then carry into the FSD)
+- Trigger retries only happen when `order.process:submitOrder` throws an ISRuntimeException (for example via `pub.flow:throwExceptionForRetry` or a transient adapter error). Its call tree never does this explicitly, so ordinary failures are not retried

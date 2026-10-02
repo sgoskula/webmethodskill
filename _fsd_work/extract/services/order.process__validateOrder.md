@@ -45,3 +45,6 @@ public static void validateOrder(IData pipeline) throws ServiceException {
         }
     }
 ```
+
+## Semantic flags (verify, then carry into the FSD)
+- Uses floating-point arithmetic (`double`/`float`) on values that may be money. A re-implementation must decide whether to copy that exactly or use a decimal type

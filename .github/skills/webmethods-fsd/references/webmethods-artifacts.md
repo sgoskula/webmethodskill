@@ -39,8 +39,8 @@ reference, `field_opt`, `nillable`).
 | `FLOW` | root | |
 | `SEQUENCE` | block | `EXIT-ON` (FAILURE/SUCCESS/DONE), `FORM` = TRY/CATCH/FINALLY on newer IS, `NAME` = case label when inside BRANCH |
 | `BRANCH` | switch | `SWITCH` = pipeline var; `LABELEXPRESSIONS="true"` → child NAMEs are boolean expressions; `$null`, `$default` special labels |
-| `LOOP` | for-each | `IN-ARRAY`, `OUT-ARRAY` |
-| `RETRY` / REPEAT | retry loop | `COUNT` (-1 = forever), `BACK-OFF` seconds, `LOOP-ON` FAILURE/SUCCESS |
+| `LOOP` | for-each | `IN-ARRAY`, `OUT-ARRAY` (see runtime semantics) |
+| `RETRY` / REPEAT | retry loop | `COUNT` = number of *re*-executions (total attempts = COUNT + 1; -1 = until the LOOP-ON condition stops), `BACK-OFF` seconds, `LOOP-ON` FAILURE/SUCCESS |
 | `INVOKE` | call service | `SERVICE`, `VALIDATE-IN/OUT`; child `MAP MODE="INPUT"/"OUTPUT"` |
 | `MAP` | transformation | children `MAPCOPY FROM→TO`, `MAPSET FIELD` (literal in `DATA/Values/value`), `MAPDELETE FIELD`, `MAPINVOKE SERVICE` (transformer) |
 | `EXIT` | exit | `FROM` ($parent, $loop, $flow, or a label), `SIGNAL` SUCCESS/FAILURE, `FAILURE-MESSAGE` |
@@ -49,6 +49,29 @@ reference, `field_opt`, `nillable`).
 
 Field paths look like `/order;4;0/lines;4;1/sku;1;0` → keep only the names: `order/lines/sku`.
 `%var%` inside set values means pipeline variable substitution when `VARIABLES="true"`.
+
+## Runtime semantics (what really happens)
+
+Check each of these when describing behaviour. `wm_extract.py` flags most of them automatically
+("Semantic flags"); without Python, apply them by hand. Where your IS version or configuration
+might differ, state the assumption as `[TO CONFIRM]`.
+
+| Construct | Runtime behaviour | FSD / migration consequence |
+|---|---|---|
+| Service invoked by a trigger | Its output pipeline is discarded. Only side effects (DB writes, calls, publishes) persist | Mark outputs "discarded"; a confirmation value nobody publishes is lost |
+| Trigger retry settings | Retries happen only when the service throws an ISRuntimeException (`pub.flow:throwExceptionForRetry`, or a transient adapter error). A normal `ServiceException` / `EXIT FAILURE` is not retried. After retries run out, the "on retry failure" setting decides between throwing and suspending the trigger | Don't write "retried N times" unless the call tree raises retryable errors |
+| `pub.client:http` | Fails only on transport errors (connection, timeout, bad URL). 4xx/5xx responses return normally with `header/status` | Unless the flow checks `header/status`, error responses (e.g. payment declined) count as success, and REPEAT/TRY doesn't retry them |
+| `REPEAT COUNT="n" LOOP-ON="FAILURE"` | Re-runs its children up to n more times while a child step fails (throws) | Total attempts = n + 1; "failure" means an exception, not a bad response |
+| `BRANCH` `$default` | Matches every value no other case matched, including null/missing and, with label expressions, values that aren't numbers | Word the row "any other value…", not "≤ X". `$null` is a separate label for missing values |
+| Label expressions (`%amount% > 1000`) | Pipeline values are usually strings; how they compare to numbers can depend on the IS version and on the value | `[TO CONFIRM]` behaviour for decimals and non-numeric input, especially when the branch runs before validation |
+| `LOOP IN-ARRAY="a/list"` | Inside the loop, `a/list` refers to the *current element*, not the list | Read paths inside a loop as per-item fields |
+| `LOOP OUT-ARRAY="xs"` | Each iteration, the pipeline variable named `xs` is appended to the output list | Check whether `xs` is ever used after the loop |
+| TRY / CATCH | CATCH runs on any failure in TRY. If CATCH doesn't rethrow or `EXIT … FAILURE`, the service *succeeds*. `pub.flow:getLastError` only reads the error; it doesn't log it | Say whether the original error is logged, returned or lost |
+| `EXIT FROM="$flow" SIGNAL="SUCCESS"` | Ends the whole service successfully; later steps don't run | Branch cases that exit early skip everything after them |
+| Adapter services on a LOCAL/XA connection | IS starts an implicit transaction and commits or rolls back when the top-level service ends, unless `pub.art.transaction:*` sets explicit boundaries. NO_TRANSACTION commits each statement right away | Whether a saved row survives a later failure depends on the connection's transaction type → `[TO CONFIRM]` |
+| Value saved by an adapter, then changed | The database keeps the value from the time of the adapter call | State the stored value; a status set afterwards is never saved unless a later call writes it |
+| Pipeline data types | Most values are `String`; `pub.math:*Floats` and Java `double` use binary floating point | List the numeric fields; decide on decimal types for money in a migration |
+| `%var%` in MAPSET with `VARIABLES="true"` | Replaced with the pipeline value at runtime, as text | Map to string building in the target |
 
 ## Common built-ins worth noting in an FSD
 - `pub.flow:getLastError`, `pub.flow:throwExceptionForRetry` → error handling / retry semantics

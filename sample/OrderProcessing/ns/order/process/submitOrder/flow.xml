@@ -32,11 +32,11 @@
         <COMMENT>Compute the extended amount for each line (qty * price).</COMMENT>
         <MAPINVOKE SERVICE="pub.math:multiplyFloats">
           <MAP MODE="INPUT">
-            <MAPCOPY FROM="lines/qty" TO="value1"/>
-            <MAPCOPY FROM="lines/price" TO="value2"/>
+            <MAPCOPY FROM="order/lines/qty" TO="num1"/>
+            <MAPCOPY FROM="order/lines/price" TO="num2"/>
           </MAP>
           <MAP MODE="OUTPUT">
-            <MAPCOPY FROM="result" TO="lineAmount"/>
+            <MAPCOPY FROM="value" TO="lineAmounts"/>
           </MAP>
         </MAPINVOKE>
       </MAP>

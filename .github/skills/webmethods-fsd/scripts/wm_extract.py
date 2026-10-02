@@ -166,6 +166,24 @@ def comment_of(el):
 
 
 STEP_TAGS = {"SEQUENCE", "BRANCH", "LOOP", "RETRY", "REPEAT", "INVOKE", "MAP", "EXIT"}
+VAR_RE = re.compile(r"%([^%]+)%")
+
+
+def top(path):
+    return clean_path(path).split("/")[0]
+
+
+def repeat_label(el):
+    count, on = el.get("COUNT", "1"), el.get("LOOP-ON", "FAILURE")
+    backoff = el.get("BACK-OFF", "0")
+    if count == "-1":
+        times = "until it stops failing" if on == "FAILURE" else "until it fails"
+    elif count.lstrip("-").isdigit():
+        # IS COUNT is the number of re-executions, so total attempts = COUNT + 1
+        times = f"up to {count} more time(s) (max {int(count) + 1} attempts)"
+    else:
+        times = f"COUNT={count}"
+    return f"REPEAT on {on}: re-run {times}, {backoff}s apart"
 
 
 class FlowWalker:
@@ -176,6 +194,46 @@ class FlowWalker:
         self.nid = 0
         self.truncated = False
         self.max_nodes = 120
+        self.events = []  # ordered (kind, path, extra): read / write / out / invoke
+        self.notes = []
+
+    def ev(self, kind, path, extra=None):
+        p = path if kind == "invoke" else clean_path(path)
+        if p:
+            self.events.append((kind, p, extra))
+
+    def map_events(self, map_el, mode):
+        """Record pipeline reads/writes of a MAP; mode is '' (standalone), 'INPUT' or 'OUTPUT'."""
+        reads = []
+        for c in map_el:
+            if c.tag == "MAPCOPY":
+                if mode == "OUTPUT":
+                    self.ev("out", c.get("FROM"))
+                else:
+                    self.ev("read", c.get("FROM"))
+                    reads.append(top(c.get("FROM")))
+                if mode != "INPUT":
+                    self.ev("write", c.get("TO"))
+            elif c.tag == "MAPSET":
+                if c.get("VARIABLES") == "true":
+                    for v in VAR_RE.findall(mapset_value(c)):
+                        self.ev("read", v)
+                        reads.append(top(v))
+                if mode != "INPUT":
+                    self.ev("write", c.get("FIELD"))
+            elif c.tag == "MAPINVOKE":
+                self.invoke_events(c)
+        return reads
+
+    def invoke_events(self, el):
+        reads = []
+        for m in el.findall("MAP"):
+            if m.get("MODE", "").upper() == "INPUT":
+                reads += self.map_events(m, "INPUT")
+        self.ev("invoke", el.get("SERVICE", "?"), tuple(reads))
+        for m in el.findall("MAP"):
+            if m.get("MODE", "").upper() == "OUTPUT":
+                self.map_events(m, "OUTPUT")
 
     def new_node(self, label, shape="rect"):
         self.nid += 1
@@ -246,6 +304,7 @@ class FlowWalker:
             expr = el.get("LABELEXPRESSIONS") == "true"
             head = f"BRANCH on {switch}" if switch else "BRANCH (evaluate labels as conditions)"
             self.lines.append(ind + head)
+            self.ev("read", switch)
             n = self.new_node(head, "dia")
             self.edge(prev, n)
             exits, has_default = [], False
@@ -254,6 +313,9 @@ class FlowWalker:
                     continue
                 case = c.get("NAME") or "(unlabelled)"
                 has_default |= case == "$default"
+                if expr:
+                    for v in VAR_RE.findall(case):
+                        self.ev("read", v)
                 kind = "WHEN" if expr else "CASE"
                 self.lines.append(f"{ind}  {kind} {case}:")
                 exits += self.walk(c, depth + 2, [n])
@@ -262,24 +324,32 @@ class FlowWalker:
                     if self.mm[i].startswith(f"  {n} --> "):
                         self.mm[i] = self.mm[i].replace(f"{n} --> ", f'{n} -->|"{case[:40]}"| ', 1)
                         break
+            what = f"`{switch}`" if switch else "label expressions"
             if not has_default:
                 self.lines.append(f"{ind}  (no $default: unmatched values fall through)")
+                self.notes.append(f"BRANCH on {what} has no `$default`: values matching no case skip "
+                                  "the branch silently")
                 exits.append(n)
+            elif expr:
+                self.notes.append(f"BRANCH on {what}: `$default` also catches missing, empty and "
+                                  "non-numeric values. Describe it as \"any other value\", never as the "
+                                  "numeric opposite of the other cases")
             return exits
 
         if t == "LOOP":
             arr, out = clean_path(el.get("IN-ARRAY")), clean_path(el.get("OUT-ARRAY"))
             head = f"LOOP over {arr}" + (f" → collect {out}" if out else "")
             self.lines.append(ind + head)
+            self.ev("read", arr)
             n = self.new_node(head, "stad")
             self.edge(prev, n)
             body_exit = self.walk_children(el, depth + 1, [n])
             self.edge([b for b in body_exit if b != n], n, "next")
+            self.ev("write", out)
             return [n]
 
         if t in ("RETRY", "REPEAT"):
-            head = (f"REPEAT up to {el.get('COUNT')} times on {el.get('LOOP-ON', 'FAILURE')}"
-                    f" (backoff {el.get('BACK-OFF', '0')}s)")
+            head = repeat_label(el)
             self.lines.append(ind + head)
             n = self.new_node(head, "stad")
             self.edge(prev, n)
@@ -296,6 +366,7 @@ class FlowWalker:
                 ops = describe_map(m)
                 if ops:
                     self.lines.append(f"{ind}  {m.get('MODE', '').lower() or 'map'}: " + "; ".join(ops))
+            self.invoke_events(el)
             n = self.new_node(("⚡ " if kind else "") + svc)
             self.edge(prev, n)
             return [n]
@@ -304,6 +375,7 @@ class FlowWalker:
             ops = describe_map(el)
             for m in el.findall("MAPINVOKE"):
                 self.invokes.append(m.get("SERVICE", "?"))
+            self.map_events(el, "")
             self.lines.append(f"{ind}MAP{' ['+label+']' if label else ''}: " + ("; ".join(ops) or "(no ops)"))
             if not ops:
                 return prev
@@ -326,14 +398,15 @@ def parse_flow(path):
     try:
         root = ET.parse(path).getroot()
     except Exception as exc:
-        return {"error": str(exc), "lines": [], "invokes": [], "mermaid": ""}
+        return {"error": str(exc), "lines": [], "invokes": [], "mermaid": "", "events": [], "notes": []}
     w = FlowWalker()
     start = w.new_node("Start", "stad")
     ends = w.walk_children(root, 0, [start])
     end = w.new_node("End", "stad")
     w.edge(ends, end)
     mermaid = "" if w.truncated else "flowchart TD\n" + "\n".join(w.mm)
-    return {"lines": w.lines, "invokes": w.invokes, "mermaid": mermaid, "truncated": w.truncated}
+    return {"lines": w.lines, "invokes": w.invokes, "mermaid": mermaid, "truncated": w.truncated,
+            "events": w.events, "notes": w.notes}
 
 
 # ---------------------------------------------------------------- java source
@@ -401,6 +474,84 @@ def kind_of(n):
     return n["node_type"] or "Other"
 
 
+# ---------------------------------------------------------------- semantic flags
+def sig_out_names(n):
+    sig = n["ndf"].get("svc_sig") if isinstance(n["ndf"], dict) else None
+    out = sig.get("sig_out") if isinstance(sig, dict) else None
+    fields = out.get("rec_fields") if isinstance(out, dict) else None
+    return {f.get("field_name") for f in fields or [] if isinstance(f, dict)}
+
+
+def reachable(root, nodes, seen=None):
+    seen = set() if seen is None else seen
+    if root not in seen:
+        seen.add(root)
+        for c in (nodes.get(root, {}).get("flow") or {}).get("invokes", []):
+            reachable(c, nodes, seen)
+    return seen
+
+
+def semantic_flags(n, nodes, referenced):
+    """Runtime behaviours that commonly differ from what the code appears to intend."""
+    fl = n.get("flow") or {}
+    flags = list(fl.get("notes", []))
+    ev = fl.get("events", [])
+    outs = sig_out_names(n)
+    head = lambda p: p.split("/")[0]  # noqa: E731
+
+    last_write = {}
+    for i, (k, p, _) in enumerate(ev):
+        if k == "write":
+            last_write[head(p)] = i
+    for var, i in last_write.items():
+        if var in outs or any(k == "read" and head(p) == var for k, p, _ in ev[i + 1:]):
+            continue
+        if var == "lastError":
+            flags.append("`lastError` from `pub.flow:getLastError` is never logged, returned or rethrown, "
+                         "so the original error is lost")
+        else:
+            flags.append(f"`{var}` is set but never used afterwards (not read later, not a declared "
+                         "output). Either it is dead logic or a step is missing")
+
+    for i, (k, p, _) in enumerate(ev):
+        if k == "invoke" and p.startswith("pub.client:http"):
+            if not any(k2 in ("read", "out") and "header" in p2.split("/") for k2, p2, _ in ev[i + 1:]):
+                flags.append("`pub.client:http` does not fail on HTTP 4xx/5xx responses, and the flow never "
+                             "checks `header/status`. Error responses count as success, and REPEAT/TRY "
+                             "never sees them")
+
+    is_adapter = lambda s: s in nodes and nodes[s]["svc_type"] not in ("", "flow", "java", "spec")  # noqa: E731
+    for i, (k, p, ins) in enumerate(ev):
+        if k != "invoke" or not is_adapter(p):
+            continue
+        for v in sorted(set(ins or ())):
+            later = [j for j, (k2, p2, _) in enumerate(ev) if j > i and k2 == "write" and head(p2) == v]
+            if later and not any(k3 == "invoke" and is_adapter(p3) and v in (x or ())
+                                 for k3, p3, x in ev[later[0] + 1:]):
+                flags.append(f"`{v}` is passed to adapter `{p}` and changed afterwards, but no later adapter "
+                             f"call saves the new value. The stored value is whatever it was at `{p}`")
+
+    if any(k == "invoke" and p.startswith("pub.math:") and "Float" in p for k, p, _ in ev) or \
+            (n.get("java") and re.search(r"\b(double|float|Double|Float)\b", n["java"])):
+        flags.append("Uses floating-point arithmetic (`double`/`float`) on values that may be money. A "
+                     "re-implementation must decide whether to copy that exactly or use a decimal type")
+
+    triggers = sorted(r for r in referenced.get(n["name"], ()) if kind_of(nodes[r]) == "Trigger")
+    if triggers and n["svc_type"] and outs:
+        flags.append(f"Invoked by trigger {', '.join(triggers)}: Integration Server discards the outputs "
+                     f"({', '.join(sorted(outs))}). Only side effects (DB writes, calls, publishes) are "
+                     "visible to anyone")
+
+    if kind_of(n) == "Trigger":
+        for t in sorted(s for s, refs in referenced.items()
+                        if n["name"] in refs and s in nodes and nodes[s]["svc_type"]):
+            if "pub.flow:throwExceptionForRetry" not in reachable(t, nodes):
+                flags.append(f"Trigger retries only happen when `{t}` throws an ISRuntimeException (for "
+                             "example via `pub.flow:throwExceptionForRetry` or a transient adapter error). "
+                             "Its call tree never does this explicitly, so ordinary failures are not retried")
+    return list(dict.fromkeys(flags))
+
+
 # ---------------------------------------------------------------- outputs
 def main():
     ap = argparse.ArgumentParser()
@@ -436,6 +587,8 @@ def main():
                 external[s].add(n["name"])
         if n["svc_type"] and n["svc_type"] not in ("flow", "java", "spec"):
             integrations[f"Adapter service ({n['svc_type']})"].add(n["name"])
+
+    flags = {name: semantic_flags(n, nodes, referenced) for name, n in nodes.items()}
 
     os.makedirs(os.path.join(a.out, "services"), exist_ok=True)
 
@@ -474,7 +627,9 @@ def main():
                 md += ["", "## SQL / statements found", *(f"```sql\n{s}\n```" for s in sql[:20])]
             md += ["", "## Raw properties (secrets redacted)", "| Key | Value |", "|---|---|"]
             md += ["| `%s` | %s |" % (k, v.replace("|", "\\|").replace("\n", " ")) for k, v in props]
-        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", n["name"].replace(":", "__"))
+        if flags[n["name"]]:
+            md += ["", "## Semantic flags (verify, then carry into the FSD)", *(f"- {x}" for x in flags[n["name"]])]
+        safe =re.sub(r"[^A-Za-z0-9_.-]", "_", n["name"].replace(":", "__"))
         with open(os.path.join(a.out, "services", safe + ".md"), "w", encoding="utf-8") as f:
             f.write("\n".join(md) + "\n")
 
@@ -516,6 +671,8 @@ def main():
             *(f"- `{t}` ← {', '.join(sorted(referenced[t]))}" for t in triggered), "",
             "## Integrations detected", *(f"- **{k}**: {', '.join(sorted(v))}" for k, v in sorted(integrations.items())), "",
             "## Calls to services outside scanned packages", *(f"- `{k}` ← {', '.join(sorted(v))}" for k, v in sorted(external.items())), "",
+            "## Semantic flags (each must be addressed in the FSD)",
+            *(f"- `{k}`: {x}" for k in sorted(flags) for x in flags[k]), "",
             "## All nodes", "| Name | Kind | Comment |", "|---|---|---|",
             *(f"| `{n['name']}` | {kind_of(n)} | {n['comment'][:80].replace(chr(10), ' ')} |" for n in sorted(nodes.values(), key=lambda x: x["name"]))]
     with open(os.path.join(a.out, "inventory.md"), "w", encoding="utf-8") as f:
@@ -525,7 +682,8 @@ def main():
                           "invoked_by": sorted(invoked_by.get(k, []))} for k, v in nodes.items()},
             "entry_points": entry, "triggered": triggered,
             "integrations": {k: sorted(v) for k, v in integrations.items()},
-            "external_calls": {k: sorted(v) for k, v in external.items()}}
+            "external_calls": {k: sorted(v) for k, v in external.items()},
+            "semantic_flags": {k: v for k, v in sorted(flags.items()) if v}}
     with open(os.path.join(a.out, "inventory.json"), "w", encoding="utf-8") as f:
         json.dump(slim, f, indent=2)
     print(f"Scanned {len(pkgs)} package(s), {len(nodes)} nodes, {len(entry)} entry points -> {a.out}")

@@ -47,7 +47,7 @@ TRY
     input: order ← order
   LOOP over order/lines → collect lineAmounts
     # Compute the extended amount for each line (qty * price).
-    MAP: transformer pub.math:multiplyFloats [value1 ← lines/qty; value2 ← lines/price; lineAmount ← result]
+    MAP: transformer pub.math:multiplyFloats [num1 ← order/lines/qty; num2 ← order/lines/price; lineAmounts ← value]
   INVOKE order.jdbc:insertOrder
     input: orderRecord/orderId ← orderId; orderRecord/customerId ← customerId; orderRecord/amount ← amount; orderRecord/status ← status
 # Persistence or validation failed: log the error, mark the order failed and abort the flow.
@@ -57,7 +57,7 @@ CATCH
   MAP: set status = "FAILED"
   EXIT from $flow signal FAILURE message "Order could not be validated or persisted"
 # Charge the payment gateway; retry up to 3 times with a 5s back-off on failure.
-REPEAT up to 3 times on FAILURE (backoff 5s)
+REPEAT on FAILURE: re-run up to 3 more time(s) (max 4 attempts), 5s apart
   INVOKE pub.client:http   ⟵ HTTP/REST call
     input: set url = "https://payments.internal/charge"; data/orderId ← orderId; data/amount ← amount
 MAP: set status = "CONFIRMED"; set confirmationNumber = "%orderId%-CONF" (with %var% substitution)
@@ -95,7 +95,7 @@ flowchart TD
   n12 --> n13
   n14(["EXIT from $flow signal FAILURE message 'Order could not be validated or persisted'"])
   n13 --> n14
-  n15(["REPEAT up to 3 times on FAILURE (backoff 5s)"])
+  n15(["REPEAT on FAILURE: re-run up to 3 more time(s) (max 4 attempts), 5s apart"])
   n10 --> n15
   n16["⚡ pub.client:http"]
   n15 --> n16
@@ -106,3 +106,12 @@ flowchart TD
   n17 --> n18
   n19(["End"])
 ```
+
+## Semantic flags (verify, then carry into the FSD)
+- BRANCH on `amount`: `$default` also catches missing, empty and non-numeric values. Describe it as "any other value", never as the numeric opposite of the other cases
+- `lineAmounts` is set but never used afterwards (not read later, not a declared output). Either it is dead logic or a step is missing
+- `lastError` from `pub.flow:getLastError` is never logged, returned or rethrown, so the original error is lost
+- `pub.client:http` does not fail on HTTP 4xx/5xx responses, and the flow never checks `header/status`. Error responses count as success, and REPEAT/TRY never sees them
+- `status` is passed to adapter `order.jdbc:insertOrder` and changed afterwards, but no later adapter call saves the new value. The stored value is whatever it was at `order.jdbc:insertOrder`
+- Uses floating-point arithmetic (`double`/`float`) on values that may be money. A re-implementation must decide whether to copy that exactly or use a decimal type
+- Invoked by trigger order.triggers:orderTrigger: Integration Server discards the outputs (confirmationNumber, orderId, status). Only side effects (DB writes, calls, publishes) are visible to anyone

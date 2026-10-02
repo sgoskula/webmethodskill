@@ -1,6 +1,6 @@
 # webMethods → FSD Kit
 
-A VS Code (GitHub Copilot Agent mode) skill that reverse-engineers a **webMethods Integration Server** application into a detailed **Functional Specification Document (FSD)**: business rules, every branch condition, data mappings, error handling, integrations, and Mermaid diagrams.
+A VS Code (GitHub Copilot Agent mode) skill that reverse-engineers a **webMethods Integration Server** application into a detailed **Functional Specification Document (FSD)**: business rules, every branch condition, data mappings, error handling, integrations, Mermaid diagrams, and **re-implementation notes for migrating to another language** (default Java).
 
 It works in two layers:
 
@@ -19,10 +19,14 @@ Raw `flow.xml` is huge and easy to misread. Extracting first means no `BRANCH` c
     └── webmethods-fsd/
         ├── SKILL.md                     # the workflow the model follows
         ├── scripts/
-        │   └── wm_extract.py            # deterministic package extractor
+        │   ├── wm_extract.py            # deterministic package extractor + semantic flags
+        │   └── check_mermaid.py         # offline Mermaid lint for the finished FSD
         └── references/
             ├── fsd-template.md          # FSD structure and per-capability section
-            └── webmethods-artifacts.md  # how to read raw IS artifacts (fallback)
+            └── webmethods-artifacts.md  # raw IS artifacts + runtime semantics
+sample/OrderProcessing/                  # synthetic IS package used as a test fixture
+tests/test_wm_fsd.py                     # tests for the extractor, lint and sample FSD
+docs/FSD.md                              # FSD generated from the sample package
 ```
 
 ## Requirements
@@ -56,30 +60,33 @@ python .github/skills/webmethods-fsd/scripts/wm_extract.py --out _fsd_work/extra
 
 | Phase | What happens | Output |
 |---|---|---|
-| 0. Scope | Confirms packages, audience, output path; asks for config that lives outside packages | |
-| 1. Extract | Runs `wm_extract.py` | `_fsd_work/extract/` |
+| 0. Scope | Confirms packages, audience, output path, migration target; asks for config that lives outside packages | |
+| 1. Extract | Runs `wm_extract.py`, including semantic flags | `_fsd_work/extract/` |
 | 2. Plan | Groups services into business capabilities rooted at entry points | `_fsd_work/plan.md` |
 | 3. Capabilities | One section per capability: trigger, I/O, sequence diagram, rules, mappings, integrations, errors, flowchart | `_fsd_work/sections/CAP-xx.md` |
 | 4. Cross-cutting | Context diagram, data dictionary, integration and error catalogs, config, NFRs | `_fsd_work/sections/common.md` |
-| 5. Assemble | Builds the FSD and runs a coverage check against the inventory | `docs/FSD.md` |
+| 4b. Re-implementation | Construct mapping to the target stack, behaviour decisions (reproduce or fix), data types, idempotency/transactions, acceptance test cases | `_fsd_work/sections/reimplementation.md` |
+| 5. Assemble | Builds the FSD, checks coverage of services, branches and semantic flags, checks for invented details, lints Mermaid | `docs/FSD.md` |
 
 **Resuming:** progress is ticked off in `_fsd_work/plan.md`. If the chat gets long or you start a new one, say *"Continue the FSD"* and it picks up at the first unticked item.
 
 ## What the extractor captures
 
-- **Flow logic:** `BRANCH` (switch and label expressions, `$default`, and the *absence* of a default), `LOOP`, `REPEAT`/retry (count, back-off), `TRY`/`CATCH`/`FINALLY`, `EXIT` with signal and message, `MAP` copy/set/drop/transformers, developer comments, and **disabled steps**.
+- **Flow logic:** `BRANCH` (switch and label expressions, `$default`, and the *absence* of a default), `LOOP`, `REPEAT`/retry (total attempts, back-off), `TRY`/`CATCH`/`FINALLY`, `EXIT` with signal and message, `MAP` copy/set/drop/transformers, developer comments, and **disabled steps**.
 - **Services:** inputs/outputs with types, optional/nillable flags and comments; Java service bodies; adapter service properties and SQL.
 - **Structure:** document types, triggers and the services they call, entry points (services nothing else invokes), who-calls-whom, and package dependencies, startup and shutdown services.
 - **Integrations:** HTTP/REST, SOAP, FTP/SFTP, SMTP, JMS, pub/sub, file I/O, Trading Networks, remote IS invokes, adapters, plus calls to services **outside the scanned packages**.
+- **Semantic flags:** runtime behaviour that differs from what the code seems to intend: values computed but never used, errors swallowed in `CATCH`, `pub.client:http` status never checked, values changed after they were saved by an adapter, floating-point money, outputs discarded because a trigger invokes the service, trigger retries that can never happen, and what `$default` really matches.
 - **Safety:** values under keys that look like password, secret, token or credential are redacted.
 
 ## What the FSD contains
 
-Introduction and glossary · system context diagram · capability summary · per capability: overview, trigger, inputs/outputs, **sequence diagram**, processing steps, **decision tables**, validations, **data mappings**, integrations used, **error and retry table**, **process flowchart**, notes · common services · data dictionary · integration catalog · error catalog · configuration and environment dependencies · non-functional characteristics seen in code · **open questions** · service inventory · coverage report.
+Introduction and glossary · system context diagram · capability summary · per capability: overview, trigger, inputs/outputs, **sequence diagram**, processing steps, **decision tables**, validations, **data mappings**, integrations used, **error and retry table**, **process flowchart**, notes · common services · data dictionary · integration catalog · error catalog · configuration and environment dependencies · non-functional characteristics seen in code · **re-implementation notes** (construct mapping, behaviour decisions, data types, idempotency, acceptance test cases) · **open questions** · service inventory · coverage report.
 
 Ground rules baked into the skill:
 
 - **No invented behaviour.** Anything not in the code is marked `[TO CONFIRM: …]` and collected under Open Questions.
+- **Runtime semantics over intent.** The FSD says what Integration Server actually does (e.g. "the database row stays `PENDING`"), not what the code appears to aim for.
 - **Traceability.** Every rule and mapping cites its source service.
 - **No secrets** are copied into any output.
 
@@ -105,7 +112,7 @@ Ground rules baked into the skill:
 | Skill isn't picked up | Confirm the path is `.github/skills/webmethods-fsd/SKILL.md` in the workspace root, you're in Agent mode, and Agent Skills are allowed by your Copilot version/org policy. Mention "webMethods FSD" in your prompt. |
 | `python` not found | Install Python 3.8+, or try `python3`/`py`. Without Python the skill falls back to reading raw files via `references/webmethods-artifacts.md` (slower). |
 | Extract reports 0 nodes | Point at the package folder itself (the one containing `ns/` and `manifest.v3`), not its parent. |
-| Mermaid diagram fails to render | Ask: *"Fix the Mermaid syntax in section X."* Common causes are unquoted labels with brackets and diagrams with too many nodes. |
+| Mermaid diagram fails to render | Run `python .github/skills/webmethods-fsd/scripts/check_mermaid.py docs/FSD.md`, then ask *"Fix the Mermaid syntax in section X."* Common causes are unquoted labels with brackets, `;` in sequence diagrams, missing `end`, and too many nodes. In VS Code, also check a Mermaid preview extension is installed. |
 | Chat runs out of context | Start a new chat and say *"Continue the FSD."* |
 
 ## Security notes
@@ -113,6 +120,14 @@ Ground rules baked into the skill:
 - The extractor only **reads** package files and writes Markdown/JSON; it makes no network calls.
 - Copilot will run it in your terminal, so review `wm_extract.py` and get it approved per your organisation's policy before use.
 - Secrets in adapter and connection nodes are redacted in the extract, but review `_fsd_work/` before sharing it.
+
+## Testing the kit
+
+```
+python3 -m unittest discover -s tests -v
+```
+
+The tests run the extractor on `sample/OrderProcessing` and check that it finds the entry point, redacts secrets, extracts Java and SQL, draws the REPEAT loop correctly, and raises the expected semantic flags (with no false positives). They also check that `check_mermaid.py` catches common errors and that every diagram in `docs/FSD.md` passes. After changing the sample, regenerate the FSD with the agent and run the tests again.
 
 ## Customising
 
