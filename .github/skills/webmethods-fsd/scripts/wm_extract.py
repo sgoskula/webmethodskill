@@ -197,6 +197,11 @@ class FlowWalker:
         self.events = []  # ordered (kind, path, extra): read / write / out / invoke
         self.notes = []
         self.endpoints = []
+        self.try_stack = []    # (label, name_stack base index, flowchart node) of enclosing TRY blocks
+        self.name_stack = []   # names of enclosing SEQUENCEs, used to resolve EXIT targets
+        self.try_exits = {}    # TRY node id -> flowchart nodes of EXIT FAILUREs caught by its CATCH
+        self.fail_exits = []   # (node id, EXIT target) for every EXIT FAILURE, used for REPEAT retry edges
+        self.error_vars = set()  # pipeline vars that receive pub.flow:getLastError output
 
     def ev(self, kind, path, extra=None):
         p = path if kind == "invoke" else clean_path(path)
@@ -240,6 +245,8 @@ class FlowWalker:
         for m in el.findall("MAP"):
             if m.get("MODE", "").upper() == "OUTPUT":
                 self.map_events(m, "OUTPUT")
+                if el.get("SERVICE") == "pub.flow:getLastError":
+                    self.error_vars |= {top(c.get("TO")) for c in m if c.tag == "MAPCOPY"}
 
     def new_node(self, label, shape="rect"):
         self.nid += 1
@@ -297,13 +304,21 @@ class FlowWalker:
                 n = self.new_node(kind + (f": {label}" if label else ""), "round")
                 if kind == "CATCH" and getattr(self, "_catch_from", None):
                     self.edge([self._catch_from], n, "on error")
+                    self.edge(self.try_exits.get(self._catch_from, []), n, "EXIT FAILURE")
                     self._catch_from = None
                 else:
                     self.edge(prev, n)
                 if kind == "TRY":
                     self._pending_try = n
                 prev = [n]
-            return self.walk_children(el, depth + 1, prev)
+            self.name_stack.append(label or "")
+            if kind == "TRY":
+                self.try_stack.append((label or "(unnamed)", len(self.name_stack) - 1, prev[0]))
+            out = self.walk_children(el, depth + 1, prev)
+            if kind == "TRY":
+                self.try_stack.pop()
+            self.name_stack.pop()
+            return out
 
         if t == "BRANCH":
             switch = clean_path(el.get("SWITCH"))
@@ -357,10 +372,19 @@ class FlowWalker:
         if t in ("RETRY", "REPEAT"):
             head = repeat_label(el)
             self.lines.append(ind + head)
+            if el.get("COUNT") == "-1" and el.get("LOOP-ON", "FAILURE") == "FAILURE":
+                self.notes.append("REPEAT with `COUNT=-1` on FAILURE has no upper bound: if the body keeps "
+                                  "failing the flow never gives up and never reaches its error handling. A "
+                                  "re-implementation needs an explicit maximum or timeout, so ask what it should be")
             n = self.new_node(head, "stad")
             self.edge(prev, n)
+            first = len(self.fail_exits)
             body_exit = self.walk_children(el, depth + 1, [n])
             self.edge([b for b in body_exit if b != n], n, "retry")
+            if el.get("LOOP-ON", "FAILURE") == "FAILURE":
+                # an EXIT FAILURE that targets a step inside the REPEAT is what makes it retry
+                self.edge([x for x, tgt in self.fail_exits[first:] if tgt not in ("$flow", "$loop")], n,
+                          "failure: retry")
             return [n]
 
         if t == "INVOKE":
@@ -393,9 +417,23 @@ class FlowWalker:
             frm, sig = el.get("FROM", "$parent"), el.get("SIGNAL", "SUCCESS")
             msg = el.get("FAILURE-MESSAGE", "")
             txt = f"EXIT from {frm} signal {sig}" + (f' message "{msg}"' if msg else "")
+            caught = None
+            if sig == "FAILURE" and self.try_stack:
+                tlabel, base, tnode = self.try_stack[-1]
+                if frm not in self.name_stack[base:] and frm != "$loop":
+                    caught = (tlabel, tnode)
+                    txt += f"  → caught by the CATCH of TRY [{tlabel}]"
+                    self.notes.append(
+                        f"`EXIT {frm} FAILURE` (\"{msg}\") sits inside TRY [{tlabel}], so it is caught by that "
+                        "TRY's CATCH and does not reach the caller as written. What the caller sees depends on "
+                        "what the CATCH does (swallow, rethrow, or its own EXIT)")
             self.lines.append(ind + txt)
             n = self.new_node(txt, "stad")
             self.edge(prev, n)
+            if sig == "FAILURE":
+                self.fail_exits.append((n, frm))
+            if caught:
+                self.try_exits.setdefault(caught[1], []).append(n)
             return [] if (sig == "FAILURE" or frm == "$flow") else [n]
         return prev
 
@@ -413,7 +451,8 @@ def parse_flow(path):
     w.edge(ends, end)
     mermaid = "" if w.truncated else "flowchart TD\n" + "\n".join(w.mm)
     return {"lines": w.lines, "invokes": w.invokes, "mermaid": mermaid, "truncated": w.truncated,
-            "events": w.events, "notes": w.notes, "endpoints": w.endpoints}
+            "events": w.events, "notes": w.notes, "endpoints": w.endpoints,
+            "error_vars": sorted(w.error_vars)}
 
 
 # ---------------------------------------------------------------- java source
@@ -503,6 +542,7 @@ def semantic_flags(n, nodes, referenced):
     fl = n.get("flow") or {}
     flags = list(fl.get("notes", []))
     ev = fl.get("events", [])
+    err_vars = set(fl.get("error_vars", ())) | {"lastError"}
     outs = sig_out_names(n)
     head = lambda p: p.split("/")[0]  # noqa: E731
 
@@ -513,8 +553,8 @@ def semantic_flags(n, nodes, referenced):
     for var, i in last_write.items():
         if var in outs or any(k == "read" and head(p) == var for k, p, _ in ev[i + 1:]):
             continue
-        if var == "lastError":
-            flags.append("`lastError` from `pub.flow:getLastError` is never logged, returned or rethrown, "
+        if var in err_vars:
+            flags.append(f"`{var}` from `pub.flow:getLastError` is never logged, returned or rethrown, "
                          "so the original error is lost")
         else:
             flags.append(f"`{var}` is set but never used afterwards (not read later, not a declared "

@@ -129,6 +129,81 @@ class ExtractorTest(unittest.TestCase):
         self.assertEqual(check_mermaid.main(files), 0)
 
 
+class ComplexFlowTest(unittest.TestCase):
+    """Stress sample sample/FulfillmentEngine: nested TRY/LOOP/BRANCH/REPEAT and EXIT scoping."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        pkgs = [os.path.join(ROOT, "sample", p) for p in ("OrderProcessing", "CommonUtils", "FulfillmentEngine")]
+        subprocess.run([sys.executable, os.path.join(SCRIPTS, "wm_extract.py"), "--out", cls.tmp.name, *pkgs],
+                       check=True, capture_output=True)
+        with open(os.path.join(cls.tmp.name, "inventory.json")) as f:
+            cls.inv = json.load(f)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def md(self, name):
+        with open(os.path.join(self.tmp.name, "services", name.replace(":", "__") + ".md")) as f:
+            return f.read()
+
+    def flags(self, name):
+        return " | ".join(self.inv["semantic_flags"].get(name, []))
+
+    ORCH = "fulfil.process:orchestrateFulfillment"
+
+    def test_exit_failure_inside_try_is_caught(self):
+        md = self.md(self.ORCH)
+        self.assertIn("→ caught by the CATCH of TRY [allocation]", md)
+        self.assertIn("sits inside TRY [allocation]", self.flags(self.ORCH))
+        # `EXIT bookOnce` targets a sequence inside TRY [booking], and the EXIT inside its CATCH is outside any TRY
+        self.assertEqual(self.flags(self.ORCH).count("sits inside TRY"), 1)
+        self.assertNotIn("caught by the CATCH of TRY [booking]", md)
+        # flowchart: the caught EXIT has an edge into the CATCH node
+        exit_id = re.search(r'(n\d+)\(\["EXIT from \$flow signal FAILURE message \'Stock allocation failed', md).group(1)
+        self.assertRegex(md, rf'{exit_id} -->\|"EXIT FAILURE"\| n\d+\n')
+
+    def test_exit_failure_outside_try_not_flagged(self):
+        self.assertNotIn("sits inside TRY", self.flags("order.process:submitOrder"))
+        self.assertNotIn("caught by", self.md("order.process:cancelOrder"))
+
+    def test_unbounded_repeat_flagged(self):
+        self.assertIn("no upper bound", self.flags("fulfil.process:allocateStock"))
+        self.assertNotIn("no upper bound", self.flags("order.process:submitOrder"))
+
+    def test_exit_failure_in_repeat_draws_retry_edge(self):
+        md = self.md(self.ORCH)
+        rid = re.search(r'(n\d+)\(\["REPEAT', md).group(1)
+        self.assertRegex(md, rf'n\d+ -->\|"failure: retry"\| {rid}\n')
+
+    def test_renamed_get_last_error_variable_flagged(self):
+        self.assertIn("`allocError` from `pub.flow:getLastError`", self.flags(self.ORCH))
+
+    def test_nested_branches_and_null_case(self):
+        md = self.md("fulfil.util:computeShipping")
+        for text in ("CASE EU:", "CASE $null:", "WHEN %weightKg% > 30:", "WHEN $default:", "CASE $default:"):
+            self.assertIn(text, md)
+        self.assertIn("`priority` has no `$default`", self.flags("fulfil.util:computeShipping"))
+
+    def test_cross_package_undeclared_dependency(self):
+        obs = " ".join(self.inv["architecture"]["observations"])
+        self.assertIn("Package `FulfillmentEngine` calls `OrderProcessing`", obs)
+
+    def test_disabled_step_and_loop_exit(self):
+        md = self.md(self.ORCH)
+        self.assertIn("INVOKE pub.publish:publish DISABLED", md)
+        self.assertIn("EXIT from $loop signal SUCCESS", md)
+
+    def test_diagrams_lint(self):
+        for name in (self.ORCH, "fulfil.process:allocateStock", "fulfil.util:computeShipping"):
+            blocks = re.findall(r"```mermaid\n(.*?)```", self.md(name), re.S)
+            self.assertTrue(blocks, name)
+            for b in blocks:
+                self.assertEqual(check_mermaid.lint_block(b)[1], [], name)
+
+
 class LargeApplicationTest(unittest.TestCase):
     def test_component_diagram_falls_back_to_folder_level(self):
         with tempfile.TemporaryDirectory() as out, \
