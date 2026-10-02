@@ -45,47 +45,91 @@ docs/FSD.md                              # FSD generated from the sample package
 
 ## Wiki and questions (`webmethods-wiki` skill)
 
-Besides the FSD, you can build a cross-linked wiki of the application and ask questions about its functionality:
+Besides the FSD, you can build a cross-linked wiki of the application and ask questions about its functionality (Copilot runs the scripts for you; see "Using it with GitHub Copilot"):
 
 > Build a wiki for `MyPackage`, then tell me what happens when a payment is declined.
-
-```
-python .github/skills/webmethods-fsd/scripts/wm_extract.py --out _fsd_work/extract <pkgDir>...
-python .github/skills/webmethods-wiki/scripts/wm_wiki.py --extract _fsd_work/extract --out _wiki
-python .github/skills/webmethods-wiki/scripts/wm_ask.py --wiki _wiki "What happens when carrier booking returns 503?"
-```
 
 `_wiki/` holds linked pages per capability, service and table, `findings.md`, and `llm_context.md` (the whole
 application in one file, no diagrams) to attach to any LLM. `wm_ask.py` ranks the relevant facts, adds the matching
 services' own logic and their callees', and prints a prompt that tells the LLM to answer only from them, cite sources
 and say "Not in the extracted facts" when it can't. Retrieval is local (BM25, no network, no packages).
 
-## Requirements
+## Using it with GitHub Copilot
+
+### Do I have to run the Python programs myself?
+
+**No.** In Copilot **Agent mode** the model runs the scripts itself through the terminal tool, as part of the
+workflow in `SKILL.md`. You ask in chat; Copilot runs `wm_extract.py`, `wm_wiki.py`, `wm_ask.py`,
+`assemble_fsd.py` and `check_mermaid.py` for you, reads their output, and writes the documents.
+
+What you do and what Copilot does:
+
+| You | Copilot (Agent mode) |
+|---|---|
+| Install Python 3.8+ once (no pip packages) | Runs the extractor over all packages in one go |
+| Put the `.github` folder and the IS packages in the workspace | Reads the extract (not the raw XML) and writes the FSD or answers your questions |
+| Ask in chat, answer the scope questions | Runs the assembly check and the Mermaid lint |
+| Click **Continue** when Copilot asks to run a terminal command | Shows you the commands it runs and what they produced |
+
+You only run the scripts by hand if you want to (see "Run the scripts yourself" below), or if Copilot can't run
+terminal commands in your setup.
+
+### What you need
 
 - VS Code with GitHub Copilot Chat in **Agent mode**, with a strong model selected (built and tuned for Claude Opus).
-- Agent Skills support in your Copilot version/org policy (skills are loaded from `.github/skills/`).
-- **Python 3.8+** on the machine (extractor only; no pip packages needed).
-- The IS package folders available in the workspace (copied from `IntegrationServer/packages/<PackageName>` or from your source control).
+- Agent Skills support in your Copilot version and org policy (skills are loaded from `.github/skills/`), and the
+  terminal tool allowed. Without a terminal tool Copilot can't run the scripts; use "Run the scripts yourself".
+- **Python 3.8+** on the machine, on the `PATH` as `python` (or `python3`). Standard library only, no pip packages.
+- The IS package folders in the workspace (copied from `IntegrationServer/packages/<PackageName>` or from source control).
 
-## Quick start
+If Python isn't installed, the skill falls back to reading the artifacts by hand with
+`references/webmethods-artifacts.md`. It still works for a few services, but it is slower and misses things the
+extractor catches deterministically, so install Python for anything real.
+
+### Quick start: the FSD
 
 1. Copy the `.github` folder into the root of the workspace that also contains your IS package folders.
-2. Open the workspace in VS Code → Copilot Chat → **Agent** mode.
+2. Open the workspace in VS Code, then Copilot Chat, then **Agent** mode.
 3. Ask:
 
    > Generate the FSD for package `MyPackage`.
 
-   For several packages: *"Generate one FSD covering packages OrderPkg and CommonUtils."* Many flow services or packages still give **one overall FSD** with an Existing Architecture section. The extractor scans them all in one run, so cross-package calls, shared utilities and shared tables are visible.
-4. The agent confirms scope, runs the extractor, shows you a capability plan, then writes the FSD one capability at a time.
+   For several packages: *"Generate one FSD covering packages OrderPkg and CommonUtils."* Many flow services or
+   packages still give **one overall FSD** with an Existing Architecture section. The extractor scans them all
+   in one run, so cross-package calls, shared utilities and shared tables are visible.
+4. Approve the terminal commands when Copilot asks. It confirms scope, runs the extractor, shows you a
+   capability plan, then writes the FSD one capability at a time.
 5. Final output: **`docs/FSD.md`**.
 
 Optional: pick the **wm-fsd** agent from the agent dropdown for the same workflow as a dedicated persona.
 
-### Run the extractor on its own
+### Quick start: the wiki and questions
+
+1. In Agent mode ask: *"Build a wiki for `MyPackage`."* Copilot runs the extractor and `wm_wiki.py` and writes `_wiki/`.
+2. Ask questions in chat, for example: *"What happens when stock allocation fails for an item?"* For each question
+   Copilot runs `wm_ask.py`, reads the facts it returns, and answers from them with sources, or says "Not in the
+   extracted facts". Pick the **wm-ask** agent for a dedicated persona.
+3. Follow-ups work the same way. If an answer misses something, say so: *"also check the trigger and the callees"*.
+4. Re-run step 1 after the packages change, because `_wiki/` is a snapshot.
+
+Without Copilot you can use `_wiki/llm_context.md` (the whole application in one file) or the output of `wm_ask.py`
+with any other LLM; see below.
+
+### Run the scripts yourself
+
+Needed only if Copilot can't run the terminal, or you want to script it or use another LLM:
 
 ```
+# extract (once over all packages)
 python .github/skills/webmethods-fsd/scripts/wm_extract.py --out _fsd_work/extract <pkgDir> [<pkgDir> ...]
+# wiki and questions
+python .github/skills/webmethods-wiki/scripts/wm_wiki.py --extract _fsd_work/extract --out _wiki
+python .github/skills/webmethods-wiki/scripts/wm_ask.py --wiki _wiki "What happens when carrier booking returns 503?"
 ```
+
+Paste the `wm_ask.py` output into any LLM chat, or attach `_wiki/llm_context.md` for a small application. For the FSD,
+run the extractor, then give Copilot or any LLM the extract plus `SKILL.md` and ask it to follow it. You'll then run
+`assemble_fsd.py` and `check_mermaid.py` yourself (see `SKILL.md` Phase 5).
 
 ## How the workflow runs
 
@@ -143,12 +187,14 @@ Ground rules baked into the skill:
 - Developed and tested against a small **synthetic** package, not a production application. IS versions differ in `node.ndf` details; on your first run, spot-check adapter services and triggers in the extract (the "Raw properties" section) against Designer.
 - Static analysis only: it cannot see runtime data, environment-specific values stored outside packages, or behaviour inside external systems.
 - Very large flows may exceed the diagram size limit; the extractor then skips the auto-diagram and the skill draws one per top-level sequence.
-- Components such as BPM/MWS process models and Trading Networks configuration are not parsed; they surface as dependencies or open questions.
+- Components such as BPM/MWS process models and Trading Networks configuration are not parsed; they surface as dependencies or open questions. For Trading Networks the calls are grouped by operation, but partner profiles, document types and processing rules are not read.
 
 ## Troubleshooting
 
 | Symptom | Try |
 |---|---|
+| Copilot won't run the scripts, or asks every time | Agent mode needs the terminal tool allowed by your org policy; approve each command (**Continue**) when asked. If it is blocked, use "Run the scripts yourself" above. |
+| Wiki answers say "Not in the extracted facts" | Ask again naming the service (*"look at `order.process:cancelOrder` and its trigger"*), or re-run `wm_wiki.py` if the packages changed. If the fact is outside the packages (scheduler, TN rules, connection settings), provide it. |
 | Skill isn't picked up | Confirm the path is `.github/skills/webmethods-fsd/SKILL.md` in the workspace root, you're in Agent mode, and Agent Skills are allowed by your Copilot version/org policy. Mention "webMethods FSD" in your prompt. |
 | `python` not found | Install Python 3.8+, or try `python3`/`py`. Without Python the skill falls back to reading raw files via `references/webmethods-artifacts.md` (slower). |
 | Extract reports 0 nodes | Point at the package folder itself (the one containing `ns/` and `manifest.v3`), not its parent. |
