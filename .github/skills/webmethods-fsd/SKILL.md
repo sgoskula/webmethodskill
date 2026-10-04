@@ -38,6 +38,12 @@ describe what the code **actually does at runtime**, not what it seems meant to 
 8. **Persist progress to disk.** Context will run out on real packages. Keep `_fsd_work/plan.md`
    as a checklist and tick items as you go, so a new chat can resume with "continue the FSD".
 9. **No secrets.** Never copy passwords, keys or tokens into any output, even if found.
+10. **Text files only, never images or binaries.** Open only the extract output and, when the extract flags
+    something unclear, specific `flow.xml`, `node.ndf`, `manifest.v3` and `code/source/**/*.java` files. Never
+    open, attach or search folders such as `pub/`, `resources/`, `code/jars/`, `code/classes/`, `doc/` or any
+    `.png`, `.gif`, `.jpg`, `.svg`, `.jar`, `.zip`, `.pdf`, `.class` file. IS packages ship many icons and images
+    in those folders, and putting them into the chat fails the request with "too many images" errors. Never
+    use workspace-wide searches or `#codebase`-style attachments over the package folders; use the extractor.
 
 ## Phase 0 — Scope (ask once, then proceed)
 

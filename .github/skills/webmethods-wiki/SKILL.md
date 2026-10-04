@@ -25,6 +25,8 @@ grounded in extracted facts, not in general webMethods knowledge or guesses.
 
 ## Answer a question
 
+Open only `_wiki` text files and `wm_ask.py` output. Never open images, jars or other binaries, and never attach or search the package folders (see rule 10 in `webmethods-fsd/SKILL.md`).
+
 Never answer from memory. Retrieve first:
 
 ```
