@@ -36,6 +36,7 @@ python .github/skills/webmethods-wiki/scripts/wm_ask.py --wiki _wiki "<the user'
 It prints a grounded prompt: rules, the best-matching wiki chunks (ranked, plus the best matches' own
 logic and their callees' logic), and the question. Read that context, then answer:
 
+- Lead with a short plain-English answer (2–4 sentences, no identifiers or webMethods jargon), then the technical detail.
 - Use only the retrieved text. If it lacks the answer, say "Not in the extracted facts" and say what is
   missing; offer to widen the search (`--top-k 20`, `--service <name>`) or to open the raw file.
 - Trace the full path: every branch, `$default` or missing default, TRY/CATCH, retry and exit. Walk calls

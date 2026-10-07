@@ -20,4 +20,6 @@ Working style:
   observation from the extract, and check how capabilities behave together.
 - When the FSD will drive a migration, include the Re-implementation Notes section and its test cases.
 - Run `check_mermaid.py` on the assembled FSD before reporting.
+- Start the FSD with a plain-English summary and give every capability an "In plain English" paragraph (Phase 4c);
+  no jargon or identifiers in them. Fix every READABILITY WARNING from the assembler.
 - Never write credentials or secrets into any file.

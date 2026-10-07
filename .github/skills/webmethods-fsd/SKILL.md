@@ -44,6 +44,11 @@ describe what the code **actually does at runtime**, not what it seems meant to 
     `.png`, `.gif`, `.jpg`, `.svg`, `.jar`, `.zip`, `.pdf`, `.class` file. IS packages ship many icons and images
     in those folders, and putting them into the chat fails the request with "too many images" errors. Never
     use workspace-wide searches or `#codebase`-style attachments over the package folders; use the extractor.
+11. **Write for the reader, plain English first.** Every FSD opens with "0. Summary in Plain English" and every
+    capability opens with an "In plain English" paragraph. Plain-English text uses short sentences, everyday
+    words and real numbers, and states consequences ("a paid order can be cancelled with no refund") rather than
+    mechanisms. Technical terms and identifiers stay in the detailed sections, which define each term the first
+    time it is used (Glossary). Never use a webMethods or Java term in a summary without explaining it in words.
 
 ## Phase 0 — Scope (ask once, then proceed)
 
@@ -214,14 +219,33 @@ the template, targeting the language from Phase 0 (default Java):
    arriving before submit): input, expected observable outcome (DB rows, outbound calls and
    counts, service result or HTTP status), source rule.
 
+## Phase 4c — Plain-English summary (write last)
+
+When all other sections exist, write the two reader-friendly layers (see the template, "0. Summary in Plain
+English" and "In plain English"):
+
+1. Insert `## 0. Summary in Plain English` into `_fsd_work/sections/00-intro.md`, between the title table and
+   Section 1. Build it from the confirmed facts: capabilities, the normal path with its real numbers, the top
+   3–7 findings (architecture findings, semantic flags, open questions, strongest first, as consequences), a
+   pointer to Open Questions, and a pointer to the behaviour decisions.
+2. Add an `**In plain English:**` paragraph (2–4 sentences) directly under every capability heading in
+   `30-CAP-xx.md`, before 5.x.1.
+3. Check the wording: could a manager who has never seen webMethods understand each sentence? Replace
+   identifiers (`orderStatus`, `$default`), webMethods terms (trigger, pipeline, MAP) and acronyms with words or
+   a one-line explanation. Do not drop facts to make it simpler; keep every number. Do not invent: every
+   statement still has to be backed by the capability sections.
+
 ## Phase 5 — Assemble and verify
 
 Section files and their order (file-name prefixes decide the order):
-`00-intro.md` (sections 1–2) · `10-architecture.md` (3) · `20-summary.md` (4 + the heading of 5) ·
+`00-intro.md` (title, section 0 plain-English summary, sections 1–2) · `10-architecture.md` (3) · `20-summary.md` (4 + the heading of 5) ·
 `30-CAP-01.md`, `31-CAP-02.md`, … (5.x) · `60-common.md` (6–11) · `70-reimplementation.md` (12) ·
 `90-closing.md` (13 + appendices).
 
-1. Assemble: `python .github/skills/webmethods-fsd/scripts/assemble_fsd.py --out docs/FSD.md`.
+1. Assemble: `python .github/skills/webmethods-fsd/scripts/assemble_fsd.py --out docs/FSD.md`. It also writes
+   `docs/FSD-summary.md` (title, plain-English summary and each capability's paragraph: the page to send to
+   non-technical readers) and prints `READABILITY WARNING` lines for a missing summary, a capability without an
+   "In plain English" paragraph, or technical terms in the summary. Fix every warning.
 2. **Coverage check**: for each node in `inventory.json`: is it referenced in the FSD body or
    listed in Appendix A? For each flow service, does every CASE, EXIT FAILURE and CATCH from its
    pseudocode appear somewhere? Is **every semantic flag and every architecture observation**

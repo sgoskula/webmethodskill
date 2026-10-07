@@ -6,6 +6,21 @@
 | Generated from | Code as of <date / commit> |
 | Status | Draft — reverse-engineered, pending SME review |
 
+## 0. Summary in Plain English
+Written last, for someone who will read only this page (a manager, a business analyst, a new team
+member). **Under ~600 words. No code identifiers, service names, field names or webMethods terms**
+(no `$default`, `MAP`, `pipeline`, `trigger` without a plain explanation). Structure:
+- **What the system does** — 3–4 sentences, business words.
+- **How a normal request goes through** — 4–7 numbered steps, each a short sentence, with the real
+  numbers (limits, retries, waits).
+- **What happens to the other requests** — one bullet per capability or special path (rejections, limits).
+- **The most important things to know** — the 3–7 findings that matter most, each stated as a plain
+  consequence ("A paid order can be cancelled with no refund"), strongest first, drawn from the
+  architecture findings, semantic flags and open questions. Say what actually results, not what the
+  code seems to intend.
+- **What could not be found out from the code** — one sentence pointing at the Open Questions section.
+- **Decisions needed** — one sentence pointing at the behaviour decisions, if migrating.
+
 ## 1. Introduction
 1.1 Purpose · 1.2 Scope (in/out) · 1.3 Glossary (business terms, acronyms, wM terms used)
 
@@ -59,6 +74,9 @@ Concerns: error handling, logging/audit, retries, transactions, configuration, s
 ## 5. Capabilities (repeat 5.x per capability)
 
 ### 5.x <CAP-xx Name>
+
+**In plain English:** 2–4 short sentences a non-technical reader can follow: what it does, what the
+customer or business sees as a result, and the one surprising thing (if any). No identifiers.
 
 **5.x.1 Overview** — business purpose in 3–5 sentences, plus one sentence on what actually
 results (rows stored, calls made), including surprising outcomes.

@@ -40,50 +40,12 @@ Failed requests are generally **not** retried automatically, and the original re
 
 **Decisions needed before a rewrite.** For each of the five issues above, decide whether the new system should copy the current behaviour exactly or fix it. They are listed with options in Section 12.2.
 
-## 1. Introduction
+## Capabilities in plain English
 
-**1.1 Purpose** — One overall specification of the order management application on webMethods
-Integration Server: how it is built today (Section 3), what each capability actually does at
-runtime (Section 5), and what a Java re-implementation must reproduce or decide (Section 12).
+**5.1 CAP-01 Order Submission.** When a new order arrives, this checks it, saves it as "PENDING" and asks the payment gateway to charge the customer. Orders over 1000 are only marked "needs approval" and then ignored. The "confirmed" status it works out at the end is never saved or sent anywhere, so the stored order always says "PENDING".
 
-**1.2 Scope** — In scope: all 12 components in the two packages:
-- 5 flow services
-- 1 Java service
-- 3 JDBC adapter services
-- 2 triggers
-- 2 document types
+**5.2 CAP-02 Order Cancellation.** When a cancellation request arrives, this changes the matching order from "PENDING" to "CANCELLED". If there is no such order, it logs a rejection and fails. It does not refund the customer, and it does not record who asked for the cancellation.
 
-Not supplied: scheduler exports, global variables, JDBC connection settings (including transaction
-type), trigger "on retry failure" settings, UM/Broker configuration, ACLs, and anything about the
-systems that publish the documents. See Section 13 (Open Questions).
+**5.3 CAP-03 Order Status Lookup.** Other systems can ask "what is the status of order X?" over the web. The answer is the order number, status and amount, or "not found", or "bad request" when no order number was given. The status is always "PENDING" or "CANCELLED", because nothing ever stores any other value.
 
-**1.3 Glossary**
-| Term | Meaning |
-|---|---|
-| IS | webMethods Integration Server |
-| Package | Deployable unit of IS components. Here `OrderProcessing` (business) and `CommonUtils` (shared) |
-| Flow service | Declarative webMethods service built from MAP, BRANCH, LOOP, INVOKE and similar steps |
-| Trigger | IS subscription that invokes a service when a matching document is published. The service's outputs are discarded |
-| REST resource | Folder with `_get`/`_post`/… services, exposed at `/rest/<folder path>` |
-| `$default` / `$null` | BRANCH cases: "any value no other case matched" / "variable missing" |
-| ISRuntimeException | The only kind of error that makes IS retry a trigger |
-| CAP-01 / 02 / 03 | Order Submission / Order Cancellation / Order Status Lookup |
-
-## 2. System Context
-
-The application takes in new orders and cancellation requests as published documents, stores
-orders in the `ORDERS` table, charges new orders through a payment gateway, and answers order
-status queries over REST. It publishes nothing back, and writes audit lines to the IS server log.
-
-```mermaid
-flowchart LR
-    Storefront["Storefront"] -- "Publish: OrderDoc, status NEW" --> APP["Order Management on IS"]
-    CS["Customer service"] -- "Publish: CancelDoc" --> APP
-    Clients["REST clients"] -- "HTTP GET /rest/order/api/orders" --> APP
-    APP -- "JDBC via OrderDB_Conn" --> DB[("ORDERS table")]
-    APP -- "HTTP: charge request" --> PG["Payment gateway"]
-    APP -- "pub.flow:debugLog" --> LOG["IS server log"]
-```
-
-The publishers of `OrderDoc` and `CancelDoc` are inferred from the document comments
-`[TO CONFIRM: actual publishing systems]`.
+_Full detail, diagrams and open questions are in the complete FSD._

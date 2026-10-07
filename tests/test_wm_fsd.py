@@ -422,6 +422,48 @@ class MermaidLintTest(unittest.TestCase):
         self.assertEqual(check_mermaid.main([os.path.join(ROOT, "docs", "FSD.md")]), 0)
 
 
+class PlainEnglishTest(unittest.TestCase):
+    """The FSD opens with a plain-English summary and each capability has a plain-English paragraph."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, SCRIPTS)
+        import assemble_fsd
+        cls.asm = assemble_fsd
+        with open(os.path.join(ROOT, "docs", "FSD.md")) as f:
+            cls.fsd = f.read()
+        with open(os.path.join(ROOT, "docs", "FSD-summary.md")) as f:
+            cls.summary = f.read()
+
+    def test_summary_comes_first_and_has_no_jargon(self):
+        self.assertLess(self.fsd.index("## 0. Summary in Plain English"), self.fsd.index("## 1. Introduction"))
+        self.assertEqual(self.asm.readability_warnings(self.fsd), [])
+
+    def test_every_capability_has_plain_english_paragraph(self):
+        for cap in ("5.1 CAP-01", "5.2 CAP-02", "5.3 CAP-03"):
+            self.assertRegex(self.fsd, rf"### {re.escape(cap)}[^\n]*\n\n\*\*In plain English:\*\*")
+
+    def test_summary_doc_matches_the_fsd(self):
+        self.assertEqual(self.summary, self.asm.summary_doc(self.fsd))
+        self.assertIn("## 0. Summary in Plain English", self.summary)
+        self.assertEqual(self.summary.count("**5."), 3)
+        self.assertNotIn("```", self.summary)
+
+    def test_warnings_for_missing_or_jargon_summary(self):
+        w = self.asm.readability_warnings("# T\n\n## 1. Introduction\n\n### 5.1 CAP-01 X\n\ntext\n")
+        self.assertTrue(any("missing section" in x for x in w))
+        self.assertTrue(any("no 'In plain English'" in x for x in w))
+        bad = "# T\n\n## 0. Summary in Plain English\n\nUses `order.process:submitOrder` and $default.\n\n## 1. X\n"
+        self.assertTrue(any("technical terms" in x for x in self.asm.readability_warnings(bad)))
+
+    def test_assembler_writes_summary_file(self):
+        with tempfile.TemporaryDirectory() as out:
+            subprocess.run([sys.executable, os.path.join(SCRIPTS, "assemble_fsd.py"), "--sections",
+                            os.path.join(ROOT, "_fsd_work", "sections"), "--out", os.path.join(out, "FSD.md")],
+                           check=True, capture_output=True)
+            self.assertTrue(os.path.isfile(os.path.join(out, "FSD-summary.md")))
+
+
 class FsdContentTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

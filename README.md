@@ -99,7 +99,7 @@ extractor catches deterministically, so install Python for anything real.
    in one run, so cross-package calls, shared utilities and shared tables are visible.
 4. Approve the terminal commands when Copilot asks. It confirms scope, runs the extractor, shows you a
    capability plan, then writes the FSD one capability at a time.
-5. Final output: **`docs/FSD.md`**.
+5. Final output: **`docs/FSD.md`**, which opens with a **plain-English summary** (Section 0) and a plain-English paragraph per capability, plus **`docs/FSD-summary.md`**, a short version with just those parts to send to non-technical readers.
 
 Optional: pick the **wm-fsd** agent from the agent dropdown for the same workflow as a dedicated persona.
 

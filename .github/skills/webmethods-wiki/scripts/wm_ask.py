@@ -22,6 +22,7 @@ RULES = """You answer questions about a webMethods Integration Server applicatio
 Rules:
 - If the context does not contain the answer, say "Not in the extracted facts" and name what is missing.
   Never guess or fill gaps from general webMethods knowledge.
+- Start with a short answer in plain English (2-4 sentences, no code identifiers, as if for a manager), then give the technical detail.
 - Describe what happens at runtime, step by step, including every branch, `$default` or missing default, TRY/CATCH and retry.
 - Cite the source of each statement as [service or file#heading].
 - Report relevant findings (semantic flags and architecture observations) even if the question did not ask.
