@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Print Here</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#14171a;--mut:#5b6670;--acc:#0b6bcb;--ok:#117a3d;--err:#b3261e;--bd:#dde1e6}
+@media(prefers-color-scheme:dark){:root{--bg:#121417;--card:#1b1f24;--fg:#eef0f2;--mut:#9aa5b1;--acc:#4da3ff;--ok:#4cc27f;--err:#ff7b72;--bd:#2d333b}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px system-ui,sans-serif}
+main{max-width:480px;margin:0 auto;padding:16px}h1{font-size:22px;margin:8px 0 16px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:16px;margin-bottom:12px}
+label{display:flex;justify-content:space-between;align-items:center;padding:8px 0}
+input[type=number],select{font:inherit;padding:8px;border-radius:8px;border:1px solid var(--bd);background:var(--bg);color:var(--fg)}
+button{width:100%;font:inherit;font-weight:600;padding:14px;border:0;border-radius:10px;background:var(--acc);color:#fff}
+button:disabled{opacity:.5}.mut{color:var(--mut);font-size:14px}.err{color:var(--err)}.ok{color:var(--ok)}
+.amt{font-size:32px;font-weight:700}.hide{display:none}
+</style></head><body><main>
+<h1>🖨️ Print Here</h1>
+
+<section id="s1" class="card">
+  <input id="files" type="file" multiple accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.rtf,.odt,.jpg,.jpeg,.png">
+  <label>Copies <input id="copies" type="number" min="1" max="20" value="1"></label>
+  <label>Color <input id="color" type="checkbox"></label>
+  <label>Double-sided <input id="duplex" type="checkbox"></label>
+  <p id="e1" class="err"></p>
+  <button id="b1">Upload &amp; get price</button>
+</section>
+
+<section id="s2" class="card hide">
+  <div class="mut" id="summary"></div>
+  <div class="amt" id="amt"></div>
+  <label>Printer <select id="printer"></select></label>
+  <p id="e2" class="err"></p>
+  <button id="b2">Pay with UPI</button>
+</section>
+
+<section id="s3" class="card hide"><h2 id="st"></h2><p id="stmsg" class="mut"></p></section>
+
+<script src="https://checkout.razorpay.com/v1/checkout.js" defer></script>
+<script>
+const $=id=>document.getElementById(id);let job=null,cfg=null;
+const rs=p=>"₹"+(p/100).toFixed(2);
+const api=async(url,opt)=>{const r=await fetch(url,opt);const j=await r.json().catch(()=>({}));
+  if(!r.ok)throw new Error(j.detail||"Something went wrong");return j};
+fetch("/api/config").then(r=>r.json()).then(c=>cfg=c);
+
+$("b1").onclick=async()=>{
+  $("e1").textContent="";const fs=$("files").files;
+  if(!fs.length){$("e1").textContent="Choose at least one file";return}
+  const fd=new FormData();for(const f of fs)fd.append("files",f);
+  fd.append("copies",$("copies").value);fd.append("color",$("color").checked);fd.append("duplex",$("duplex").checked);
+  $("b1").disabled=true;$("b1").textContent="Checking…";
+  try{
+    job=await api("/api/jobs",{method:"POST",body:fd});
+    const pages=job.files.reduce((a,f)=>a+f.pages,0);
+    $("summary").textContent=`${job.files.length} file(s), ${pages} page(s) × ${job.options.copies} cop${job.options.copies>1?"ies":"y"}, ${job.options.color?"color":"B/W"}`;
+    $("amt").textContent=rs(job.amount_paise);
+    const ps=await api("/api/printers");
+    $("printer").innerHTML=ps.filter(p=>(!job.options.color||p.color)&&(!job.options.duplex||p.duplex))
+      .map(p=>`<option value="${p.id}">${p.name}</option>`).join("");
+    if(!$("printer").options.length)$("e2").textContent="No printer supports these options. Go back and change them.";
+    $("s1").classList.add("hide");$("s2").classList.remove("hide");
+  }catch(e){$("e1").textContent=e.message}
+  $("b1").disabled=false;$("b1").textContent="Upload & get price";
+};
+
+function done(j){
+  $("s2").classList.add("hide");$("s3").classList.remove("hide");
+  const m={printed:["✅ Sent to printer","Collect your pages from "+j.printer+"."],
+    failed:["⚠️ Payment received, print failed","Please show this screen to the operator. Job "+j.id.slice(0,8)],
+    paid:["Payment received","Printing…"],printing:["Printing…",""],awaiting_payment:["Waiting for payment…","Don't close this page."]};
+  [$("st").textContent,$("stmsg").textContent]=m[j.status]||[j.status,""];
+}
+async function poll(){for(let i=0;i<60;i++){const j=await api("/api/jobs/"+job.id);done(j);
+  if(j.status==="printed"||j.status==="failed")return;await new Promise(r=>setTimeout(r,2000))}}
+
+$("b2").onclick=async()=>{
+  $("e2").textContent="";$("b2").disabled=true;
+  try{
+    const o=await api(`/api/jobs/${job.id}/pay`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({printer:$("printer").value})});
+    if(o.provider==="mock"){await api(`/api/jobs/${job.id}/mock-pay`,{method:"POST"});return poll()}
+    new Razorpay({key:o.key_id,order_id:o.order_id,amount:o.amount,currency:"INR",name:"Print Here",
+      config:{display:{blocks:{upi:{name:"Pay via UPI",instruments:[{method:"upi"}]}},sequence:["block.upi"],preferences:{show_default_blocks:false}}},
+      handler:async r=>{await api(`/api/jobs/${job.id}/verify`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(r)});poll()},
+      modal:{ondismiss:()=>{$("b2").disabled=false}}}).open();
+    poll();
+  }catch(e){$("e2").textContent=e.message;$("b2").disabled=false}
+};
+</script></main></body></html>
